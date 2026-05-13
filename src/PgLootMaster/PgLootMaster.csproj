@@ -1,0 +1,17 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+  <ItemGroup>
+    <ProjectReference Include="..\PgLootMaster.Capture\PgLootMaster.Capture.csproj" />
+    <ProjectReference Include="..\PgLootMaster.Vision\PgLootMaster.Vision.csproj" />
+    <ProjectReference Include="..\PgLootMaster.Solver\PgLootMaster.Solver.csproj" />
+  </ItemGroup>
+
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net8.0-windows10.0.19041.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+
+</Project>
