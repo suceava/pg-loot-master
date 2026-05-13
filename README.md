@@ -1,0 +1,30 @@
+# pg-loot-master
+
+Windows desktop overlay that watches Project: Gorgon's **Loot Master Match-3** minigame, recognizes the board, runs a cascade-aware solver, and draws the recommended swap on top of the game.
+
+## Status
+
+Planning. No code yet. See [PLAN.md](./PLAN.md) for the design and [SESSION_NOTES.md](./SESSION_NOTES.md) for the decisions and tradeoffs behind it.
+
+## Stack
+
+.NET 8 + WPF + C#, Windows-only. Windows.Graphics.Capture for screen capture, OpenCvSharp4 for board recognition.
+
+## Getting started (Windows machine)
+
+1. Install [.NET 8 SDK (x64)](https://dotnet.microsoft.com/download/dotnet/8.0).
+2. Install [VS Code](https://code.visualstudio.com/) + the **C# Dev Kit** extension.
+3. Install [Git for Windows](https://git-scm.com/download/win).
+4. Run Project: Gorgon in **borderless windowed** mode (not exclusive fullscreen).
+5. Smoke test the toolchain:
+    ```powershell
+    mkdir C:\dev\wpf-smoketest && cd C:\dev\wpf-smoketest
+    dotnet new wpf
+    dotnet run
+    ```
+    Blank window appears = ready. Delete the folder afterward.
+
+## Repo conventions
+
+- Plan-of-record lives in `PLAN.md` at repo root.
+- Solution scaffolding (`PgLootMaster.sln` and `src/`, `test/`) gets created on the Windows machine where the WPF/Windows-SDK tooling can actually link binaries. The Mac side is for editing only.
