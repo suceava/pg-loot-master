@@ -35,7 +35,7 @@ public sealed class GameWindowTracker : IDisposable
     private GameWindowRect? _lastRect;
     private bool _disposed;
 
-    public event Action<GameWindowRect>? GameWindowChanged;
+    public event Action<IntPtr, GameWindowRect>? GameWindowChanged;
     public event Action? GameWindowLost;
 
     public void Start()
@@ -78,7 +78,8 @@ public sealed class GameWindowTracker : IDisposable
         }
 
         Action? toRaise = null;
-        Action<GameWindowRect>? toRaiseWithRect = null;
+        Action<IntPtr, GameWindowRect>? toRaiseChanged = null;
+        IntPtr handleArg = IntPtr.Zero;
         GameWindowRect? rectArg = null;
 
         lock (_lock)
@@ -103,7 +104,8 @@ public sealed class GameWindowTracker : IDisposable
                 {
                     _trackedHandle = handle;
                     _lastRect = rect;
-                    toRaiseWithRect = GameWindowChanged;
+                    toRaiseChanged = GameWindowChanged;
+                    handleArg = handle;
                     rectArg = rect;
                 }
             }
@@ -114,10 +116,10 @@ public sealed class GameWindowTracker : IDisposable
             DebugLog.Write("Firing GameWindowLost");
             toRaise.Invoke();
         }
-        if (toRaiseWithRect is not null && rectArg.HasValue)
+        if (toRaiseChanged is not null && rectArg.HasValue)
         {
-            DebugLog.Write($"Firing GameWindowChanged {rectArg.Value}");
-            toRaiseWithRect.Invoke(rectArg.Value);
+            DebugLog.Write($"Firing GameWindowChanged handle=0x{handleArg.ToInt64():X} {rectArg.Value}");
+            toRaiseChanged.Invoke(handleArg, rectArg.Value);
         }
     }
 

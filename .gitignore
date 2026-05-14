@@ -16,6 +16,9 @@ x86/
 *.swp
 .idea/
 
+# Claude Code (per-machine permission cache; shared .claude/settings.json is OK to commit)
+.claude/settings.local.json
+
 # Test results
 TestResults/
 *.trx

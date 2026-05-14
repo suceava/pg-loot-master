@@ -34,6 +34,8 @@ public partial class OverlayWindow : Window
     private static extern IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
 
     private readonly GameWindowTracker _tracker = new();
+    private readonly CaptureCoordinator _captureCoordinator;
+    private readonly DebugFrameSink _debugFrameSink;
 
     public OverlayWindow()
     {
@@ -43,7 +45,18 @@ public partial class OverlayWindow : Window
         _tracker.GameWindowChanged += OnGameWindowChanged;
         _tracker.GameWindowLost += OnGameWindowLost;
 
-        Closed += (_, _) => { OverlayLog.Write("Closed -> disposing tracker"); _tracker.Dispose(); };
+        _captureCoordinator = new CaptureCoordinator(_tracker);
+        _debugFrameSink = new DebugFrameSink(
+            System.IO.Path.Combine(AppContext.BaseDirectory, "debug-frames"),
+            TimeSpan.FromSeconds(1));
+        _captureCoordinator.FrameArrived += _debugFrameSink.Accept;
+
+        Closed += (_, _) =>
+        {
+            OverlayLog.Write("Closed -> disposing capture + tracker");
+            _captureCoordinator.Dispose();
+            _tracker.Dispose();
+        };
     }
 
     protected override void OnSourceInitialized(EventArgs e)
@@ -60,9 +73,9 @@ public partial class OverlayWindow : Window
         OverlayLog.Write("Tracker started from OnSourceInitialized");
     }
 
-    private void OnGameWindowChanged(GameWindowRect rect)
+    private void OnGameWindowChanged(IntPtr handle, GameWindowRect rect)
     {
-        OverlayLog.Write($"OnGameWindowChanged called from thread {Environment.CurrentManagedThreadId} rect={rect}");
+        OverlayLog.Write($"OnGameWindowChanged called from thread {Environment.CurrentManagedThreadId} handle=0x{handle.ToInt64():X} rect={rect}");
         Dispatcher.Invoke(() =>
         {
             DpiScale dpi = VisualTreeHelper.GetDpi(this);
