@@ -5,8 +5,10 @@ using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
 using PgLootMaster.Capture;
+using PgLootMaster.Solver;
 using PgLootMaster.Vision;
 using OpenCvMat = OpenCvSharp.Mat;
+using SolverBoard = PgLootMaster.Solver.Board;
 
 namespace PgLootMaster;
 
@@ -19,6 +21,20 @@ internal static class OverlayLog
         lock (Sync)
         {
             try { File.AppendAllText(Path, $"{DateTime.Now:HH:mm:ss.fff} OVERLAY: {m}{Environment.NewLine}"); }
+            catch { }
+        }
+    }
+}
+
+internal static class SolverLog
+{
+    private static readonly string Path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "pg-loot-master-solver.log");
+    private static readonly object Sync = new();
+    public static void Write(string m)
+    {
+        lock (Sync)
+        {
+            try { File.AppendAllText(Path, $"{DateTime.Now:HH:mm:ss.fff}{Environment.NewLine}{m}{Environment.NewLine}"); }
             catch { }
         }
     }
@@ -61,6 +77,7 @@ public partial class OverlayWindow : Window
     private int[] _latestClusterIds = Array.Empty<int>();
     private IReadOnlyList<OpenCvSharp.Rect> _displayedCells = Array.Empty<OpenCvSharp.Rect>();
     private int[] _displayedClusterIds = Array.Empty<int>();
+    private SwapRecommendation? _displayedRecommendation;
     private DateTime _nextPanelDetectionUtc;
     private bool _lastDetectionSucceeded;
 
@@ -162,6 +179,7 @@ public partial class OverlayWindow : Window
         {
             _displayedCells = cells;
             _displayedClusterIds = _latestClusterIds;
+            _displayedRecommendation = TrySolve(_latestClusterIds);
         }
 
         Dispatcher.Invoke(() =>
@@ -195,13 +213,56 @@ public partial class OverlayWindow : Window
                     CellCanvas.Children.Add(r);
                 }
                 CellCanvas.Visibility = Visibility.Visible;
+
+                DrawSuggestion(dpi);
             }
             else
             {
                 PanelBorder.Visibility = Visibility.Collapsed;
                 CellCanvas.Visibility = Visibility.Collapsed;
+                SuggestionCanvas.Visibility = Visibility.Collapsed;
             }
         });
+    }
+
+    private void DrawSuggestion(DpiScale dpi)
+    {
+        SuggestionCanvas.Children.Clear();
+        if (_displayedRecommendation is null || _displayedCells.Count != SolverBoard.Dim * SolverBoard.Dim)
+        {
+            SuggestionCanvas.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        Swap swap = _displayedRecommendation.Swap;
+        OpenCvSharp.Rect a = _displayedCells[swap.Row1 * SolverBoard.Dim + swap.Col1];
+        OpenCvSharp.Rect b = _displayedCells[swap.Row2 * SolverBoard.Dim + swap.Col2];
+
+        SolidColorBrush highlightBrush = new(Color.FromRgb(255, 20, 147));
+        DrawSwapHighlight(a, highlightBrush, dpi);
+        DrawSwapHighlight(b, highlightBrush, dpi);
+
+        SuggestionCanvas.Visibility = Visibility.Visible;
+    }
+
+    private void DrawSwapHighlight(OpenCvSharp.Rect cell, Brush brush, DpiScale dpi)
+    {
+        double left = cell.X / dpi.DpiScaleX;
+        double top = cell.Y / dpi.DpiScaleY;
+        double width = cell.Width / dpi.DpiScaleX;
+        double height = cell.Height / dpi.DpiScaleY;
+
+        System.Windows.Shapes.Rectangle r = new()
+        {
+            Stroke = brush,
+            StrokeThickness = 6,
+            Fill = System.Windows.Media.Brushes.Transparent,
+            Width = width,
+            Height = height,
+        };
+        Canvas.SetLeft(r, left);
+        Canvas.SetTop(r, top);
+        SuggestionCanvas.Children.Add(r);
     }
 
     protected override void OnSourceInitialized(EventArgs e)
@@ -237,5 +298,60 @@ public partial class OverlayWindow : Window
     {
         OverlayLog.Write("OnGameWindowLost");
         Dispatcher.Invoke(() => Visibility = Visibility.Hidden);
+    }
+
+    private SwapRecommendation? _previouslyLoggedRecommendation;
+
+    private SwapRecommendation? TrySolve(int[] clusterIds)
+    {
+        if (clusterIds.Length != SolverBoard.Dim * SolverBoard.Dim) return null;
+        int[,] grid = new int[SolverBoard.Dim, SolverBoard.Dim];
+        for (int r = 0; r < SolverBoard.Dim; r++)
+        {
+            for (int c = 0; c < SolverBoard.Dim; c++)
+            {
+                grid[r, c] = clusterIds[r * SolverBoard.Dim + c];
+            }
+        }
+        SwapRecommendation? rec = PgLootMaster.Solver.Solver.FindBestSwap(new SolverBoard(grid), out List<SwapRecommendation> top);
+        bool swapChanged = rec is not null
+            && (_previouslyLoggedRecommendation is null
+                || _previouslyLoggedRecommendation.Swap != rec.Swap);
+        if (swapChanged)
+        {
+            int showCount = Math.Min(5, top.Count);
+            if (top.Count > 5)
+            {
+                double cutoff = top[showCount - 1].Score * 0.8;
+                for (int i = 5; i < top.Count && i < 12; i++)
+                {
+                    if (top[i].Score < cutoff) break;
+                    showCount = i + 1;
+                }
+            }
+
+            System.Text.StringBuilder sb = new();
+            sb.AppendLine("---- BOARD (cluster IDs) ----");
+            for (int r = 0; r < SolverBoard.Dim; r++)
+            {
+                for (int c = 0; c < SolverBoard.Dim; c++)
+                {
+                    sb.Append(grid[r, c].ToString("D2"));
+                    sb.Append(' ');
+                }
+                sb.AppendLine();
+            }
+            sb.AppendLine($"---- TOP {showCount} CANDIDATES (of {top.Count}) ----");
+            for (int i = 0; i < showCount; i++)
+            {
+                SwapRecommendation s = top[i];
+                sb.AppendLine($"  #{i + 1} ({s.Swap.Row1},{s.Swap.Col1})<->({s.Swap.Row2},{s.Swap.Col2}) total={s.Score:F1} imm={s.ImmediateScore:F1} look={s.LookaheadScore:F1} maxRun={s.Cascade.MaxRunLength} cells={s.Cascade.TotalCellsMatched}");
+            }
+            string content = sb.ToString();
+            SolverLog.Write(content);
+            Dispatcher.Invoke(() => StatusText.Text = content);
+            _previouslyLoggedRecommendation = rec;
+        }
+        return rec;
     }
 }

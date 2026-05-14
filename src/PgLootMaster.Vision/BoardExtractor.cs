@@ -20,13 +20,37 @@ public sealed class BoardExtractor
     {
         if (cells.Count != GridDim * GridDim) return cells;
 
-        List<OpenCvRect> byY = cells.OrderBy(c => c.Y).ToList();
-        List<OpenCvRect> sorted = new(cells.Count);
-        for (int row = 0; row < GridDim; row++)
+        int minY = cells.Min(c => c.Y);
+        int maxY = cells.Max(c => c.Y);
+        double rowSpan = Math.Max(1, (maxY - minY) / (double)(GridDim - 1));
+
+        List<List<OpenCvRect>> rows = new(GridDim);
+        for (int i = 0; i < GridDim; i++) rows.Add(new List<OpenCvRect>());
+        foreach (OpenCvRect cell in cells)
         {
-            List<OpenCvRect> rowCells = byY.GetRange(row * GridDim, GridDim);
-            rowCells.Sort((a, b) => a.X.CompareTo(b.X));
-            sorted.AddRange(rowCells);
+            int row = (int)Math.Round((cell.Y - minY) / rowSpan);
+            row = Math.Clamp(row, 0, GridDim - 1);
+            rows[row].Add(cell);
+        }
+
+        if (rows.Any(r => r.Count != GridDim))
+        {
+            List<OpenCvRect> byY = cells.OrderBy(c => c.Y).ToList();
+            List<OpenCvRect> fallback = new(cells.Count);
+            for (int r = 0; r < GridDim; r++)
+            {
+                List<OpenCvRect> rowCells = byY.GetRange(r * GridDim, GridDim);
+                rowCells.Sort((a, b) => a.X.CompareTo(b.X));
+                fallback.AddRange(rowCells);
+            }
+            return fallback;
+        }
+
+        List<OpenCvRect> sorted = new(cells.Count);
+        for (int r = 0; r < GridDim; r++)
+        {
+            rows[r].Sort((a, b) => a.X.CompareTo(b.X));
+            sorted.AddRange(rows[r]);
         }
         return sorted;
     }
