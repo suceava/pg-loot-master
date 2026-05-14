@@ -41,8 +41,26 @@ public partial class OverlayWindow : Window
     private readonly DebugFrameSink _debugFrameSink;
     private readonly PanelLocator _panelLocator;
     private readonly BoardExtractor _boardExtractor = new();
-    private readonly System.Windows.Media.SolidColorBrush _cellBrush = new(System.Windows.Media.Color.FromRgb(0, 200, 255));
+    private readonly CellClusterer _cellClusterer = new();
+    private static readonly System.Windows.Media.Color[] ClusterColors = new[]
+    {
+        System.Windows.Media.Color.FromRgb(255, 64, 64),
+        System.Windows.Media.Color.FromRgb(64, 255, 64),
+        System.Windows.Media.Color.FromRgb(64, 128, 255),
+        System.Windows.Media.Color.FromRgb(255, 220, 0),
+        System.Windows.Media.Color.FromRgb(255, 0, 220),
+        System.Windows.Media.Color.FromRgb(0, 220, 220),
+        System.Windows.Media.Color.FromRgb(255, 140, 0),
+        System.Windows.Media.Color.FromRgb(180, 0, 220),
+        System.Windows.Media.Color.FromRgb(255, 255, 255),
+        System.Windows.Media.Color.FromRgb(128, 128, 128),
+    };
+    private const int MinAcceptableClusters = 3;
+
     private IReadOnlyList<OpenCvSharp.Rect> _latestCells = Array.Empty<OpenCvSharp.Rect>();
+    private int[] _latestClusterIds = Array.Empty<int>();
+    private IReadOnlyList<OpenCvSharp.Rect> _displayedCells = Array.Empty<OpenCvSharp.Rect>();
+    private int[] _displayedClusterIds = Array.Empty<int>();
     private DateTime _nextPanelDetectionUtc;
     private bool _lastDetectionSucceeded;
 
@@ -103,6 +121,14 @@ public partial class OverlayWindow : Window
                 try
                 {
                     cells = _boardExtractor.TryDetectCells(bgrFrame, loc.Value.TitleBar);
+                    if (cells.Count == BoardExtractor.GridDim * BoardExtractor.GridDim)
+                    {
+                        _latestClusterIds = _cellClusterer.ClusterCells(bgrFrame, cells);
+                    }
+                    else
+                    {
+                        _latestClusterIds = Array.Empty<int>();
+                    }
                 }
                 finally
                 {
@@ -116,20 +142,27 @@ public partial class OverlayWindow : Window
             return;
         }
 
+        int clusterCount = _latestClusterIds.Length == 0 ? 0 : _latestClusterIds.Max() + 1;
         bool found = loc.HasValue;
         if (found != _lastDetectionSucceeded)
         {
             OverlayLog.Write(found
-                ? $"PanelLocator: PANEL FOUND at {loc!.Value.TitleBar.X},{loc.Value.TitleBar.Y} confidence={loc.Value.Confidence:F3}; detected {cells.Count} cells"
+                ? $"PanelLocator: PANEL FOUND at {loc!.Value.TitleBar.X},{loc.Value.TitleBar.Y} confidence={loc.Value.Confidence:F3}; {cells.Count} cells, {clusterCount} clusters"
                 : "PanelLocator: panel lost");
             _lastDetectionSucceeded = found;
         }
         else if (found)
         {
-            OverlayLog.Write($"PanelLocator: tracking, {cells.Count} cells detected");
+            OverlayLog.Write($"PanelLocator: tracking, {cells.Count} cells, {clusterCount} clusters");
         }
 
         _latestCells = cells;
+        bool acceptThisFrame = found && clusterCount >= MinAcceptableClusters && cells.Count == BoardExtractor.GridDim * BoardExtractor.GridDim;
+        if (acceptThisFrame)
+        {
+            _displayedCells = cells;
+            _displayedClusterIds = _latestClusterIds;
+        }
 
         Dispatcher.Invoke(() =>
         {
@@ -144,12 +177,15 @@ public partial class OverlayWindow : Window
                 PanelBorder.Visibility = Visibility.Visible;
 
                 CellCanvas.Children.Clear();
-                foreach (OpenCvSharp.Rect cellRect in _latestCells)
+                for (int i = 0; i < _displayedCells.Count; i++)
                 {
+                    OpenCvSharp.Rect cellRect = _displayedCells[i];
+                    int clusterId = i < _displayedClusterIds.Length ? _displayedClusterIds[i] : 0;
+                    System.Windows.Media.Color color = ClusterColors[clusterId % ClusterColors.Length];
                     System.Windows.Shapes.Rectangle r = new()
                     {
-                        Stroke = _cellBrush,
-                        StrokeThickness = 1,
+                        Stroke = new System.Windows.Media.SolidColorBrush(color),
+                        StrokeThickness = 3,
                         Fill = System.Windows.Media.Brushes.Transparent,
                         Width = cellRect.Width / dpi.DpiScaleX,
                         Height = cellRect.Height / dpi.DpiScaleY,

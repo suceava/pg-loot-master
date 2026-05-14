@@ -16,6 +16,21 @@ public sealed class BoardExtractor
     private static int _debugCount;
     private static readonly string DebugDir = Path.Combine(Path.GetTempPath(), "pg-loot-master-grid-debug");
 
+    private static List<OpenCvRect> SortIntoGrid(List<OpenCvRect> cells)
+    {
+        if (cells.Count != GridDim * GridDim) return cells;
+
+        List<OpenCvRect> byY = cells.OrderBy(c => c.Y).ToList();
+        List<OpenCvRect> sorted = new(cells.Count);
+        for (int row = 0; row < GridDim; row++)
+        {
+            List<OpenCvRect> rowCells = byY.GetRange(row * GridDim, GridDim);
+            rowCells.Sort((a, b) => a.X.CompareTo(b.X));
+            sorted.AddRange(rowCells);
+        }
+        return sorted;
+    }
+
     public IReadOnlyList<OpenCvRect> TryDetectCells(OpenCvMat bgrFrame, OpenCvRect titleBar)
     {
         if (bgrFrame.Channels() != 3) return Array.Empty<OpenCvRect>();
@@ -52,6 +67,8 @@ public sealed class BoardExtractor
             if (ratio < CellMinAspect || ratio > CellMaxAspect) continue;
             cells.Add(new OpenCvRect(bbox.X + sx, bbox.Y + sy, bbox.Width, bbox.Height));
         }
+
+        cells = SortIntoGrid(cells);
 
         if (Interlocked.Increment(ref _debugCount) == 1)
         {
