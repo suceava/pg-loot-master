@@ -13,5 +13,11 @@
         Left="-32000" Top="-32000" Width="1" Height="1">
     <Grid>
         <Border BorderBrush="Magenta" BorderThickness="3" />
+        <Canvas IsHitTestVisible="False">
+            <Border x:Name="PanelBorder"
+                    BorderBrush="Lime"
+                    BorderThickness="4"
+                    Visibility="Collapsed" />
+        </Canvas>
     </Grid>
 </Window>

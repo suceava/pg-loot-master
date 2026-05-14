@@ -1,9 +1,12 @@
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Interop;
 using System.Windows.Media;
 using PgLootMaster.Capture;
+using PgLootMaster.Vision;
+using OpenCvMat = OpenCvSharp.Mat;
 
 namespace PgLootMaster;
 
@@ -36,6 +39,9 @@ public partial class OverlayWindow : Window
     private readonly GameWindowTracker _tracker = new();
     private readonly CaptureCoordinator _captureCoordinator;
     private readonly DebugFrameSink _debugFrameSink;
+    private readonly PanelLocator _panelLocator;
+    private DateTime _nextPanelDetectionUtc;
+    private bool _lastDetectionSucceeded;
 
     public OverlayWindow()
     {
@@ -51,12 +57,63 @@ public partial class OverlayWindow : Window
             TimeSpan.FromSeconds(1));
         _captureCoordinator.FrameArrived += _debugFrameSink.Accept;
 
+        string templatePath = System.IO.Path.Combine(AppContext.BaseDirectory, "Templates", "panel-title.png");
+        _panelLocator = new PanelLocator(templatePath);
+        _captureCoordinator.FrameArrived += OnFrameForPanelDetection;
+        OverlayLog.Write($"PanelLocator loaded template from {templatePath}");
+
         Closed += (_, _) =>
         {
-            OverlayLog.Write("Closed -> disposing capture + tracker");
+            OverlayLog.Write("Closed -> disposing capture + tracker + locator");
             _captureCoordinator.Dispose();
             _tracker.Dispose();
+            _panelLocator.Dispose();
         };
+    }
+
+    private void OnFrameForPanelDetection(OpenCvMat frame)
+    {
+        DateTime now = DateTime.UtcNow;
+        if (now < _nextPanelDetectionUtc) return;
+        _nextPanelDetectionUtc = now.AddMilliseconds(250);
+
+        PanelLocation? loc;
+        try
+        {
+            loc = _panelLocator.TryLocate(frame);
+        }
+        catch (Exception ex)
+        {
+            OverlayLog.Write($"PanelLocator error: {ex.GetType().Name}: {ex.Message}");
+            return;
+        }
+
+        bool found = loc.HasValue;
+        if (found != _lastDetectionSucceeded)
+        {
+            OverlayLog.Write(found
+                ? $"PanelLocator: PANEL FOUND at {loc!.Value.TitleBar.X},{loc.Value.TitleBar.Y} {loc.Value.TitleBar.Width}x{loc.Value.TitleBar.Height} confidence={loc.Value.Confidence:F3}"
+                : "PanelLocator: panel lost");
+            _lastDetectionSucceeded = found;
+        }
+
+        Dispatcher.Invoke(() =>
+        {
+            if (loc.HasValue)
+            {
+                DpiScale dpi = VisualTreeHelper.GetDpi(this);
+                OpenCvSharp.Rect r = loc.Value.TitleBar;
+                Canvas.SetLeft(PanelBorder, r.X / dpi.DpiScaleX);
+                Canvas.SetTop(PanelBorder, r.Y / dpi.DpiScaleY);
+                PanelBorder.Width = r.Width / dpi.DpiScaleX;
+                PanelBorder.Height = r.Height / dpi.DpiScaleY;
+                PanelBorder.Visibility = Visibility.Visible;
+            }
+            else
+            {
+                PanelBorder.Visibility = Visibility.Collapsed;
+            }
+        });
     }
 
     protected override void OnSourceInitialized(EventArgs e)
