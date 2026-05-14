@@ -18,6 +18,7 @@
                     BorderBrush="Lime"
                     BorderThickness="4"
                     Visibility="Collapsed" />
+            <Canvas x:Name="CellCanvas" Visibility="Collapsed" />
         </Canvas>
     </Grid>
 </Window>

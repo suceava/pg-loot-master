@@ -40,6 +40,9 @@ public partial class OverlayWindow : Window
     private readonly CaptureCoordinator _captureCoordinator;
     private readonly DebugFrameSink _debugFrameSink;
     private readonly PanelLocator _panelLocator;
+    private readonly BoardExtractor _boardExtractor = new();
+    private readonly System.Windows.Media.SolidColorBrush _cellBrush = new(System.Windows.Media.Color.FromRgb(0, 200, 255));
+    private IReadOnlyList<OpenCvSharp.Rect> _latestCells = Array.Empty<OpenCvSharp.Rect>();
     private DateTime _nextPanelDetectionUtc;
     private bool _lastDetectionSucceeded;
 
@@ -62,6 +65,7 @@ public partial class OverlayWindow : Window
         _captureCoordinator.FrameArrived += OnFrameForPanelDetection;
         OverlayLog.Write($"PanelLocator loaded template from {templatePath}");
 
+
         Closed += (_, _) =>
         {
             OverlayLog.Write("Closed -> disposing capture + tracker + locator");
@@ -78,13 +82,37 @@ public partial class OverlayWindow : Window
         _nextPanelDetectionUtc = now.AddMilliseconds(250);
 
         PanelLocation? loc;
+        IReadOnlyList<OpenCvSharp.Rect> cells = Array.Empty<OpenCvSharp.Rect>();
         try
         {
             loc = _panelLocator.TryLocate(frame);
+            if (loc.HasValue)
+            {
+                OpenCvMat bgrFrame;
+                OpenCvMat? converted = null;
+                if (frame.Channels() == 4)
+                {
+                    converted = new OpenCvMat();
+                    OpenCvSharp.Cv2.CvtColor(frame, converted, OpenCvSharp.ColorConversionCodes.BGRA2BGR);
+                    bgrFrame = converted;
+                }
+                else
+                {
+                    bgrFrame = frame;
+                }
+                try
+                {
+                    cells = _boardExtractor.TryDetectCells(bgrFrame, loc.Value.TitleBar);
+                }
+                finally
+                {
+                    converted?.Dispose();
+                }
+            }
         }
         catch (Exception ex)
         {
-            OverlayLog.Write($"PanelLocator error: {ex.GetType().Name}: {ex.Message}");
+            OverlayLog.Write($"PanelLocator/BoardExtractor error: {ex.GetType().Name}: {ex.Message}");
             return;
         }
 
@@ -92,26 +120,50 @@ public partial class OverlayWindow : Window
         if (found != _lastDetectionSucceeded)
         {
             OverlayLog.Write(found
-                ? $"PanelLocator: PANEL FOUND at {loc!.Value.TitleBar.X},{loc.Value.TitleBar.Y} {loc.Value.TitleBar.Width}x{loc.Value.TitleBar.Height} confidence={loc.Value.Confidence:F3}"
+                ? $"PanelLocator: PANEL FOUND at {loc!.Value.TitleBar.X},{loc.Value.TitleBar.Y} confidence={loc.Value.Confidence:F3}; detected {cells.Count} cells"
                 : "PanelLocator: panel lost");
             _lastDetectionSucceeded = found;
         }
+        else if (found)
+        {
+            OverlayLog.Write($"PanelLocator: tracking, {cells.Count} cells detected");
+        }
+
+        _latestCells = cells;
 
         Dispatcher.Invoke(() =>
         {
             if (loc.HasValue)
             {
                 DpiScale dpi = VisualTreeHelper.GetDpi(this);
-                OpenCvSharp.Rect r = loc.Value.TitleBar;
-                Canvas.SetLeft(PanelBorder, r.X / dpi.DpiScaleX);
-                Canvas.SetTop(PanelBorder, r.Y / dpi.DpiScaleY);
-                PanelBorder.Width = r.Width / dpi.DpiScaleX;
-                PanelBorder.Height = r.Height / dpi.DpiScaleY;
+                OpenCvSharp.Rect titleBar = loc.Value.TitleBar;
+                Canvas.SetLeft(PanelBorder, titleBar.X / dpi.DpiScaleX);
+                Canvas.SetTop(PanelBorder, titleBar.Y / dpi.DpiScaleY);
+                PanelBorder.Width = titleBar.Width / dpi.DpiScaleX;
+                PanelBorder.Height = titleBar.Height / dpi.DpiScaleY;
                 PanelBorder.Visibility = Visibility.Visible;
+
+                CellCanvas.Children.Clear();
+                foreach (OpenCvSharp.Rect cellRect in _latestCells)
+                {
+                    System.Windows.Shapes.Rectangle r = new()
+                    {
+                        Stroke = _cellBrush,
+                        StrokeThickness = 1,
+                        Fill = System.Windows.Media.Brushes.Transparent,
+                        Width = cellRect.Width / dpi.DpiScaleX,
+                        Height = cellRect.Height / dpi.DpiScaleY,
+                    };
+                    Canvas.SetLeft(r, cellRect.X / dpi.DpiScaleX);
+                    Canvas.SetTop(r, cellRect.Y / dpi.DpiScaleY);
+                    CellCanvas.Children.Add(r);
+                }
+                CellCanvas.Visibility = Visibility.Visible;
             }
             else
             {
                 PanelBorder.Visibility = Visibility.Collapsed;
+                CellCanvas.Visibility = Visibility.Collapsed;
             }
         });
     }
