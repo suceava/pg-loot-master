@@ -12,7 +12,9 @@ public static class Solver
     private const double VerticalBonus = 1.2;
     private const double BottomBonusPerRow = 0.5;
     private const double LTShapeBonus = 12.0;
-    private const double LookaheadDiscount = 0.5;
+    private const double LookaheadDiscount = 0.3;
+    private const double FourMatchTurnBonus = 200.0;
+    private const double FiveMatchTurnBonus = 500.0;
 
     public static SwapRecommendation? FindBestSwap(Board board, out List<SwapRecommendation> topCandidates)
     {
@@ -49,14 +51,25 @@ public static class Solver
     public static double ScoreCascade(CascadeResult result)
     {
         double score = 0;
-        foreach (IReadOnlyList<Match> step in result.Steps)
+        bool firstStepHasFour = false;
+        bool firstStepHasFive = false;
+        for (int stepIdx = 0; stepIdx < result.Steps.Count; stepIdx++)
         {
+            IReadOnlyList<Match> step = result.Steps[stepIdx];
+            double stepWeight = stepIdx == 0 ? 1.0 : 0.3 * Math.Pow(0.7, stepIdx - 1);
             foreach (Match m in step)
             {
-                score += ScoreSingleMatch(m);
+                score += ScoreSingleMatch(m) * stepWeight;
+                if (stepIdx == 0)
+                {
+                    if (m.Length >= 5) firstStepHasFive = true;
+                    else if (m.Length >= 4) firstStepHasFour = true;
+                }
             }
-            score += CountLTOverlapCells(step) * LTShapeBonus;
+            score += CountLTOverlapCells(step) * LTShapeBonus * stepWeight;
         }
+        if (firstStepHasFive) score += FiveMatchTurnBonus;
+        else if (firstStepHasFour) score += FourMatchTurnBonus;
         return score;
     }
 
