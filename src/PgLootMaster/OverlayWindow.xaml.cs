@@ -58,6 +58,10 @@ public partial class OverlayWindow : Window
     private readonly PanelLocator _panelLocator;
     private readonly BoardExtractor _boardExtractor = new();
     private readonly CellClusterer _cellClusterer = new();
+    private readonly SidebarReader _sidebarReader = new();
+    private readonly ItemMatcher _itemMatcher = new();
+    private IReadOnlyList<SidebarItem> _latestSidebarItems = Array.Empty<SidebarItem>();
+    private int[] _latestClusterToTemplate = Array.Empty<int>();
     private static readonly System.Windows.Media.Color[] ClusterColors = new[]
     {
         System.Windows.Media.Color.FromRgb(255, 64, 64),
@@ -140,11 +144,29 @@ public partial class OverlayWindow : Window
                     cells = _boardExtractor.TryDetectCells(bgrFrame, loc.Value.TitleBar);
                     if (cells.Count == BoardExtractor.GridDim * BoardExtractor.GridDim)
                     {
+                        _latestSidebarItems = _sidebarReader.ReadItems(bgrFrame, loc.Value.TitleBar);
+                        // Borders are keyed by the cell clusterer (proven to give unique IDs per
+                        // visually-distinct item). The ItemMatcher only labels each cluster with
+                        // a sidebar item name for display — if its label is wrong, the borders
+                        // still correctly separate distinct items.
                         _latestClusterIds = _cellClusterer.ClusterCells(bgrFrame, cells);
+                        if (_latestSidebarItems.Count > 0)
+                        {
+                            _itemMatcher.SetTemplates(_latestSidebarItems);
+                            // Hue-based post-split: catch the case where the clusterer merged
+                            // visually-distinct items whose BGR signatures happen to be close.
+                            _latestClusterIds = _itemMatcher.SplitMixedClusters(bgrFrame, cells, _latestClusterIds);
+                            _latestClusterToTemplate = _itemMatcher.LabelClusters(bgrFrame, cells, _latestClusterIds);
+                        }
+                        else
+                        {
+                            _latestClusterToTemplate = Array.Empty<int>();
+                        }
                     }
                     else
                     {
                         _latestClusterIds = Array.Empty<int>();
+                        _latestClusterToTemplate = Array.Empty<int>();
                     }
                 }
                 finally
@@ -331,6 +353,29 @@ public partial class OverlayWindow : Window
             }
 
             System.Text.StringBuilder sb = new();
+            if (_latestSidebarItems.Count > 0)
+            {
+                sb.AppendLine("---- ITEMS ----");
+                for (int i = 0; i < _latestSidebarItems.Count; i++)
+                {
+                    string name = _latestSidebarItems[i].Name;
+                    if (string.IsNullOrEmpty(name)) name = $"(item {i})";
+                    sb.AppendLine($"  {i}: {name}");
+                }
+            }
+            if (_latestClusterToTemplate.Length > 0 && _latestSidebarItems.Count > 0)
+            {
+                sb.AppendLine("---- CLUSTER -> ITEM ----");
+                for (int c = 0; c < _latestClusterToTemplate.Length; c++)
+                {
+                    int t = _latestClusterToTemplate[c];
+                    string name = (t >= 0 && t < _latestSidebarItems.Count)
+                        ? _latestSidebarItems[t].Name
+                        : "(unknown)";
+                    if (string.IsNullOrEmpty(name)) name = $"item {t}";
+                    sb.AppendLine($"  cluster {c} -> {name}");
+                }
+            }
             sb.AppendLine("---- BOARD (cluster IDs) ----");
             for (int r = 0; r < SolverBoard.Dim; r++)
             {

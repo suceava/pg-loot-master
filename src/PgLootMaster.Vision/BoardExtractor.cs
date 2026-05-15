@@ -59,10 +59,10 @@ public sealed class BoardExtractor
     {
         if (bgrFrame.Channels() != 3) return Array.Empty<OpenCvRect>();
 
-        int sx = Math.Max(0, titleBar.X - 200);
+        int sx = Math.Max(0, titleBar.X - 30);
         int sy = Math.Max(0, titleBar.Y + titleBar.Height);
-        int sw = Math.Min(1800, bgrFrame.Cols - sx);
-        int sh = Math.Min(1400, bgrFrame.Rows - sy);
+        int sw = Math.Min(940, bgrFrame.Cols - sx);
+        int sh = Math.Min(1050, bgrFrame.Rows - sy);
         if (sw < 200 || sh < 200) return Array.Empty<OpenCvRect>();
 
         using OpenCvMat roi = new(bgrFrame, new OpenCvRect(sx, sy, sw, sh));
@@ -90,6 +90,11 @@ public sealed class BoardExtractor
             double ratio = (double)bbox.Width / bbox.Height;
             if (ratio < CellMinAspect || ratio > CellMaxAspect) continue;
             cells.Add(new OpenCvRect(bbox.X + sx, bbox.Y + sy, bbox.Width, bbox.Height));
+        }
+
+        if (cells.Count > GridDim * GridDim)
+        {
+            cells = cells.OrderByDescending(c => (long)c.Width * c.Height).Take(GridDim * GridDim).ToList();
         }
 
         cells = SortIntoGrid(cells);

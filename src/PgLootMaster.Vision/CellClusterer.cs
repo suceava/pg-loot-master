@@ -47,6 +47,8 @@ public sealed class CellClusterer
     private int _framesSinceLargeChangeEnded;
     private bool _needsRecapture = true;
     private const int FramesBeforeForceRecapture = 5;
+    private readonly Queue<byte[][]> _stableFrameBuffer = new();
+    private const int StableFrameBufferDepth = 4;
 
     public int[] ClusterCells(OpenCvMat bgrFrame, IReadOnlyList<OpenCvRect> cells)
     {
@@ -79,9 +81,22 @@ public sealed class CellClusterer
                             || changedCells >= MinChangedCellsForLargeChange;
         }
 
+        // Maintain a rolling buffer of recent stable-frame signatures so canonical capture
+        // can average over multiple frames — averaging out pulsating-tile drift so the
+        // pulsating cell ends up in the same cluster as its non-pulsing siblings.
+        if (isStableFrame)
+        {
+            _stableFrameBuffer.Enqueue(CloneSignatures(signatures));
+            while (_stableFrameBuffer.Count > StableFrameBufferDepth) _stableFrameBuffer.Dequeue();
+        }
+        else if (isLargeChange)
+        {
+            _stableFrameBuffer.Clear();
+        }
+
         if (_canonicalClusterReps is null)
         {
-            CaptureCanonical(signatures);
+            CaptureCanonical(AveragedStableSignatures(signatures));
             _needsRecapture = false;
             _consecutiveStableFrames = 0;
             _framesSinceLargeChangeEnded = 0;
@@ -103,8 +118,8 @@ public sealed class CellClusterer
             bool timeoutReached = _framesSinceLargeChangeEnded >= FramesBeforeForceRecapture;
             if (stabilityReached || timeoutReached)
             {
-                ClustererLog.Write($"Recapturing canonical (stable={stabilityReached}, timeout={timeoutReached})");
-                CaptureCanonical(signatures);
+                ClustererLog.Write($"Recapturing canonical (stable={stabilityReached}, timeout={timeoutReached}, buffer={_stableFrameBuffer.Count})");
+                CaptureCanonical(AveragedStableSignatures(signatures));
                 _needsRecapture = false;
                 _framesSinceLargeChangeEnded = 0;
                 _consecutiveStableFrames = 0;
@@ -158,6 +173,56 @@ public sealed class CellClusterer
         return stableIds;
     }
 
+    private byte[][] AveragedStableSignatures(byte[][] currentFrame)
+    {
+        if (_stableFrameBuffer.Count == 0) return currentFrame;
+        int cellCount = currentFrame.Length;
+        int sigLen = currentFrame[0].Length;
+        byte[][] avg = new byte[cellCount][];
+        for (int i = 0; i < cellCount; i++) avg[i] = new byte[sigLen];
+
+        int frameCount = 0;
+        foreach (byte[][] frame in _stableFrameBuffer)
+        {
+            if (frame.Length != cellCount) continue;
+            frameCount++;
+            for (int i = 0; i < cellCount; i++)
+            {
+                if (frame[i].Length != sigLen) continue;
+                for (int b = 0; b < sigLen; b++)
+                {
+                    avg[i][b] += (byte)(frame[i][b] / Math.Max(1, _stableFrameBuffer.Count));
+                }
+            }
+        }
+        if (frameCount == 0) return currentFrame;
+        // Recompute as proper average to avoid rounding.
+        for (int i = 0; i < cellCount; i++)
+        {
+            int[] sums = new int[sigLen];
+            int n = 0;
+            foreach (byte[][] frame in _stableFrameBuffer)
+            {
+                if (frame.Length != cellCount || frame[i].Length != sigLen) continue;
+                n++;
+                for (int b = 0; b < sigLen; b++) sums[b] += frame[i][b];
+            }
+            if (n == 0) { Array.Copy(currentFrame[i], avg[i], sigLen); continue; }
+            for (int b = 0; b < sigLen; b++) avg[i][b] = (byte)(sums[b] / n);
+        }
+        return avg;
+    }
+
+    private static byte[][] CloneSignatures(byte[][] sigs)
+    {
+        byte[][] clone = new byte[sigs.Length][];
+        for (int i = 0; i < sigs.Length; i++)
+        {
+            clone[i] = (byte[])sigs[i].Clone();
+        }
+        return clone;
+    }
+
     private void CaptureCanonical(byte[][] signatures)
     {
         _canonicalSignatures = new byte[signatures.Length][];
@@ -201,6 +266,49 @@ public sealed class CellClusterer
         foreach (List<byte[]> members in clusterMembers)
         {
             averages.Add(ComputeAverage(members, sigLen));
+        }
+
+        // Post-process: merge small clusters (≤2 members) into their nearest larger cluster
+        // when the centroid distance is below SmallClusterMergeThreshold. This catches
+        // pulsating-tile outliers — a hint cell whose pulse phase pulled it just past the
+        // similarity threshold during canonical capture.
+        bool mergedSmall = true;
+        const double SmallClusterMergeThreshold = 35.0;
+        const int SmallClusterMaxMembers = 1;
+        while (mergedSmall && clusterMembers.Count > 1)
+        {
+            mergedSmall = false;
+            for (int a = 0; a < clusterMembers.Count; a++)
+            {
+                if (clusterMembers[a].Count > SmallClusterMaxMembers) continue;
+                int nearestB = -1;
+                double nearestDist = SmallClusterMergeThreshold;
+                for (int b = 0; b < clusterMembers.Count; b++)
+                {
+                    if (b == a) continue;
+                    if (clusterMembers[b].Count <= SmallClusterMaxMembers) continue;
+                    double d = AverageAbsDifference(averages[a], averages[b]);
+                    if (d < nearestDist) { nearestDist = d; nearestB = b; }
+                }
+                if (nearestB >= 0)
+                {
+                    int from = a;
+                    int to = nearestB;
+                    clusterMembers[to].AddRange(clusterMembers[from]);
+                    averages[to] = ComputeAverage(clusterMembers[to], sigLen);
+                    clusterMembers.RemoveAt(from);
+                    averages.RemoveAt(from);
+                    // After removing 'from', indices > from shift down by 1.
+                    int actualTo = to > from ? to - 1 : to;
+                    for (int i = 0; i < ids.Length; i++)
+                    {
+                        if (ids[i] == from) ids[i] = actualTo;
+                        else if (ids[i] > from) ids[i]--;
+                    }
+                    mergedSmall = true;
+                    break;
+                }
+            }
         }
 
         bool merged = true;
