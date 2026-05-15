@@ -9,7 +9,7 @@
         ShowInTaskbar="False"
         ResizeMode="NoResize"
         SizeToContent="WidthAndHeight"
-        Left="40" Top="40"
+        WindowStartupLocation="Manual"
         MouseLeftButtonDown="OnDragMouseDown">
     <Border Background="#E0202020"
             BorderBrush="#FF20FF20"

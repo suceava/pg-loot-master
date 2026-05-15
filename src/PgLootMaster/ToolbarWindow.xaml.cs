@@ -10,6 +10,8 @@ public partial class ToolbarWindow : Window
     public ToolbarWindow()
     {
         InitializeComponent();
+        Left = OverlaySettings.Instance.ToolbarLeft;
+        Top = OverlaySettings.Instance.ToolbarTop;
     }
 
     private void OnDragMouseDown(object sender, MouseButtonEventArgs e)
@@ -17,6 +19,8 @@ public partial class ToolbarWindow : Window
         if (e.ChangedButton == MouseButton.Left)
         {
             DragMove();
+            OverlaySettings.Instance.ToolbarLeft = Left;
+            OverlaySettings.Instance.ToolbarTop = Top;
         }
     }
 

@@ -30,6 +30,20 @@ public sealed class OverlaySettings : INotifyPropertyChanged
         set => Set(ref _showDebugTextWindow, value);
     }
 
+    private double _toolbarLeft = 40;
+    public double ToolbarLeft
+    {
+        get => _toolbarLeft;
+        set => Set(ref _toolbarLeft, value);
+    }
+
+    private double _toolbarTop = 40;
+    public double ToolbarTop
+    {
+        get => _toolbarTop;
+        set => Set(ref _toolbarTop, value);
+    }
+
     public event PropertyChangedEventHandler? PropertyChanged;
 
     private void Set<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
@@ -53,6 +67,8 @@ public sealed class OverlaySettings : INotifyPropertyChanged
                 {
                     settings.ShowBoardOverlay = loaded.ShowBoardOverlay;
                     settings.ShowDebugTextWindow = loaded.ShowDebugTextWindow;
+                    settings.ToolbarLeft = loaded.ToolbarLeft;
+                    settings.ToolbarTop = loaded.ToolbarTop;
                 }
             }
         }
