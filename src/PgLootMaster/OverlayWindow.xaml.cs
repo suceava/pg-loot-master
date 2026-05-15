@@ -90,6 +90,9 @@ public partial class OverlayWindow : Window
         OverlayLog.Write("OverlayWindow ctor");
         InitializeComponent();
 
+        OverlaySettings.Instance.PropertyChanged += (_, _) => Dispatcher.Invoke(ApplySettings);
+        ApplySettings();
+
         _tracker.GameWindowChanged += OnGameWindowChanged;
         _tracker.GameWindowLost += OnGameWindowLost;
 
@@ -209,12 +212,6 @@ public partial class OverlayWindow : Window
             if (loc.HasValue)
             {
                 DpiScale dpi = VisualTreeHelper.GetDpi(this);
-                OpenCvSharp.Rect titleBar = loc.Value.TitleBar;
-                Canvas.SetLeft(PanelBorder, titleBar.X / dpi.DpiScaleX);
-                Canvas.SetTop(PanelBorder, titleBar.Y / dpi.DpiScaleY);
-                PanelBorder.Width = titleBar.Width / dpi.DpiScaleX;
-                PanelBorder.Height = titleBar.Height / dpi.DpiScaleY;
-                PanelBorder.Visibility = Visibility.Visible;
 
                 CellCanvas.Children.Clear();
                 for (int i = 0; i < _displayedCells.Count; i++)
@@ -234,13 +231,14 @@ public partial class OverlayWindow : Window
                     Canvas.SetTop(r, cellRect.Y / dpi.DpiScaleY);
                     CellCanvas.Children.Add(r);
                 }
-                CellCanvas.Visibility = Visibility.Visible;
+                CellCanvas.Visibility = OverlaySettings.Instance.ShowBoardOverlay
+                    ? Visibility.Visible
+                    : Visibility.Collapsed;
 
                 DrawSuggestion(dpi);
             }
             else
             {
-                PanelBorder.Visibility = Visibility.Collapsed;
                 CellCanvas.Visibility = Visibility.Collapsed;
                 SuggestionCanvas.Visibility = Visibility.Collapsed;
             }
@@ -285,6 +283,21 @@ public partial class OverlayWindow : Window
         Canvas.SetLeft(r, left);
         Canvas.SetTop(r, top);
         SuggestionCanvas.Children.Add(r);
+    }
+
+    private void ApplySettings()
+    {
+        StatusBorder.Visibility = OverlaySettings.Instance.ShowDebugTextWindow
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        if (!OverlaySettings.Instance.ShowBoardOverlay)
+        {
+            CellCanvas.Visibility = Visibility.Collapsed;
+        }
+        else if (_displayedCells.Count > 0)
+        {
+            CellCanvas.Visibility = Visibility.Visible;
+        }
     }
 
     protected override void OnSourceInitialized(EventArgs e)

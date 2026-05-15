@@ -1,0 +1,41 @@
+<Window x:Class="PgLootMaster.ToolbarWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="PG Loot Master"
+        WindowStyle="None"
+        AllowsTransparency="True"
+        Background="Transparent"
+        Topmost="True"
+        ShowInTaskbar="False"
+        ResizeMode="NoResize"
+        SizeToContent="WidthAndHeight"
+        Left="40" Top="40"
+        MouseLeftButtonDown="OnDragMouseDown">
+    <Border Background="#E0202020"
+            BorderBrush="#FF20FF20"
+            BorderThickness="1"
+            CornerRadius="4"
+            Padding="6,4">
+        <StackPanel Orientation="Horizontal">
+            <TextBlock Text="PG Loot Master"
+                       Foreground="White"
+                       FontFamily="Consolas"
+                       FontSize="12"
+                       VerticalAlignment="Center"
+                       Margin="4,0,12,0" />
+            <Button x:Name="SettingsButton"
+                    Content="Settings"
+                    Width="60" Height="24"
+                    FontSize="11"
+                    Margin="0,0,4,0"
+                    Click="OnSettingsClick" />
+            <Button x:Name="CloseButton"
+                    Content="Close"
+                    Width="50" Height="24"
+                    FontSize="11"
+                    Background="#FF802020"
+                    Foreground="White"
+                    Click="OnCloseClick" />
+        </StackPanel>
+    </Border>
+</Window>
