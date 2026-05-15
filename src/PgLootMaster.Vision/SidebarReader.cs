@@ -10,6 +10,12 @@ public sealed class SidebarItem
     public OpenCvMat Icon { get; }
     public OpenCvRect FrameRect { get; }
     public string Name { get; set; } = string.Empty;
+    // Count of matches captured so far for this item, parsed from the trailing number in the
+    // OCR'd row (e.g. "Pixie Sugar 12" → CaptureCount=12). Null if no count was found
+    // (item already captured, shown with a checkmark instead, or OCR missed it).
+    public int? CaptureCount { get; set; }
+    // True if the right edge of the item row shows a green checkmark (item already captured).
+    public bool Captured { get; set; }
 
     public SidebarItem(int index, OpenCvMat icon, OpenCvRect frameRect)
     {
@@ -29,7 +35,7 @@ public sealed class SidebarReader
     private const int IconColumnXInSidebar = 18;
     private const int IconColumnWidth = 80;
     private const int ScanStartYInSidebar = 400;
-    private const int ScanEndYInSidebar = 900;
+    private const int ScanEndYInSidebar = 980;
     private const int IconCropXInSidebar = 20;
     private const int IconCropSize = 55;
     private const int MinBlobHeight = 18;
@@ -104,15 +110,45 @@ public sealed class SidebarReader
             smoothed[y] = sum / (2 * smoothWindow + 1);
         }
 
+        // First pass: moderate-profile rows are clearly icons. Separator strips have profile
+        // near full column width (>= sepCutoff). But some items (Mercury — silvery, doesn't
+        // match the tan mask) saturate to profile=80 throughout the icon, indistinguishable
+        // from a separator on its own. Disambiguate by stretch length: ≤30 rows = separator,
+        // > 30 rows = icon row (real icons are ~70-100 rows tall).
         bool[] isIconRow = new bool[scanH];
+        int highStart = -1;
         for (int y = 0; y < scanH; y++)
         {
-            isIconRow[y] = smoothed[y] >= 2 && smoothed[y] < sepCutoff;
+            bool moderate = smoothed[y] >= 2 && smoothed[y] < sepCutoff;
+            bool high = smoothed[y] >= sepCutoff;
+            isIconRow[y] = moderate;
+            // Track high-profile stretches; if a stretch is too long to be a separator,
+            // backfill it as icon rows.
+            if (high && highStart == -1) highStart = y;
+            else if (!high && highStart != -1)
+            {
+                int len = y - highStart;
+                if (len > 55)
+                {
+                    for (int k = highStart; k < y; k++) isIconRow[k] = true;
+                }
+                highStart = -1;
+            }
+        }
+        // Re-promote a high-profile stretch that runs to scan end IF it's substantial.
+        // With ScanEndYInSidebar set just inside the panel bottom, the stone wall is past
+        // scan end. A real last-item icon (e.g. Mercury silvery) at the very bottom gives
+        // a high-profile stretch reaching scan end with length ≥ ~50 (an icon's height).
+        // The 4-item case has no stretch touching scan end because everything is empty tan.
+        if (highStart != -1 && scanH - highStart >= 50)
+        {
+            for (int k = highStart; k < scanH; k++) isIconRow[k] = true;
         }
 
         List<int> rowCentersY = new();
         int segStart = -1;
         int minSegmentLen = 15;
+        const int ExpectedRowStride = 80;
         for (int y = 0; y < scanH; y++)
         {
             if (isIconRow[y] && segStart == -1)
@@ -122,18 +158,33 @@ public sealed class SidebarReader
             else if (!isIconRow[y] && segStart != -1)
             {
                 int segEnd = y - 1;
-                if (segEnd - segStart + 1 >= minSegmentLen)
-                {
-                    int midLocal = (segStart + segEnd) / 2;
-                    rowCentersY.Add(scanRect.Y + midLocal);
-                }
+                AddSegmentRows(rowCentersY, scanRect.Y, segStart, segEnd, minSegmentLen, ExpectedRowStride);
                 segStart = -1;
             }
         }
-        if (segStart != -1 && scanH - segStart >= minSegmentLen)
+        if (segStart != -1)
         {
-            int midLocal = (segStart + scanH - 1) / 2;
-            rowCentersY.Add(scanRect.Y + midLocal);
+            AddSegmentRows(rowCentersY, scanRect.Y, segStart, scanH - 1, minSegmentLen, ExpectedRowStride);
+        }
+
+        // Gap-fill: if two consecutive detected rows are >1.5x stride apart, the row between
+        // them was missed (e.g., adjacent silvery items both fully saturating the column mask).
+        // Insert evenly-spaced rows in the gap to recover them.
+        if (rowCentersY.Count >= 2)
+        {
+            List<int> filled = new() { rowCentersY[0] };
+            for (int i = 1; i < rowCentersY.Count; i++)
+            {
+                int gap = rowCentersY[i] - rowCentersY[i - 1];
+                int extras = (int)Math.Round(gap / (double)ExpectedRowStride) - 1;
+                for (int e = 1; e <= extras; e++)
+                {
+                    int y = rowCentersY[i - 1] + e * gap / (extras + 1);
+                    filled.Add(y);
+                }
+                filled.Add(rowCentersY[i]);
+            }
+            rowCentersY = filled;
         }
 
         // For each row center, snap to a fixed icon rect at a fixed X.
@@ -149,10 +200,37 @@ public sealed class SidebarReader
             iconRect = ClampToFrame(iconRect, bgrFrame);
             if (iconRect.Width < IconCropSize - 5 || iconRect.Height < IconCropSize - 5) continue;
             OpenCvMat iconCrop = new OpenCvMat(bgrFrame, iconRect).Clone();
-            items.Add(new SidebarItem(i, iconCrop, iconRect));
+            SidebarItem item = new(i, iconCrop, iconRect);
+
+            // Captured-checkmark detection: the right edge of each row shows a bright green
+            // checkmark for captured items. Sample a small box at the right side of the row.
+            OpenCvRect checkRect = new(
+                sidebarRect.X + sidebarRect.Width - 90,
+                rowCentersY[i] - 24,
+                75,
+                48);
+            checkRect = ClampToFrame(checkRect, bgrFrame);
+            if (checkRect.Width > 5 && checkRect.Height > 5)
+            {
+                using OpenCvMat checkRoi = new(bgrFrame, checkRect);
+                using OpenCvMat greenMask = new();
+                Cv2.InRange(checkRoi, new Scalar(20, 140, 20), new Scalar(180, 255, 180), greenMask);
+                int greenCount = Cv2.CountNonZero(greenMask);
+                item.Captured = greenCount > 30;
+                try
+                {
+                    Cv2.ImWrite(Path.Combine(DebugDir, $"check-{i}.png"), checkRoi);
+                    Cv2.ImWrite(Path.Combine(DebugDir, $"check-mask-{i}.png"), greenMask);
+                }
+                catch { }
+            }
+
+            items.Add(item);
         }
 
-        // OCR the sidebar to extract item names. Match each OCR line to the row whose Y is closest.
+        // OCR the sidebar to extract item names. Match each OCR line to the row whose Y is
+        // closest. Sort lines by Y first so multi-line wrapped names (e.g. "Extreme Healing /
+        // Potion") join in natural reading order.
         IReadOnlyList<OcrLine> ocrLines = Array.Empty<OcrLine>();
         if (_ocr.IsAvailable && items.Count > 0)
         {
@@ -160,7 +238,8 @@ public sealed class SidebarReader
             {
                 using OpenCvMat sidebarCropForOcr = new(bgrFrame, sidebarRect);
                 ocrLines = _ocr.Recognize(sidebarCropForOcr);
-                foreach (OcrLine line in ocrLines)
+                List<OcrLine> sorted = ocrLines.OrderBy(l => l.Bbox.Y).ToList();
+                foreach (OcrLine line in sorted)
                 {
                     int lineYInFrame = sidebarRect.Y + line.Bbox.Y + line.Bbox.Height / 2;
                     // Skip header text (Score, Turns Left, help text) — anything well above the first item.
@@ -180,6 +259,43 @@ public sealed class SidebarReader
                         else
                             nearest.Name = line.Text;
                     }
+                }
+
+                // Pull the capture-count number out of each item's name. The count is OCR'd as
+                // a pure-digit token (e.g. "Pixie Sugar 12"). For wrapped names where the count
+                // appears mid-string due to the wrap rejoin ("Healing Potion 3 Extreme"), find
+                // the standalone digit token, strip it, and treat the remaining words as the name.
+                foreach (SidebarItem it in items)
+                {
+                    if (string.IsNullOrEmpty(it.Name)) continue;
+                    string[] tokens = it.Name.Split(' ', StringSplitOptions.RemoveEmptyEntries);
+                    int? count = null;
+                    List<string> nameTokens = new();
+                    foreach (string tok in tokens)
+                    {
+                        // OCR commonly reads digit "0" as letter "O" (e.g. "Fillet O" really
+                        // means count=0). Normalize O/o → 0 before checking if the whole token
+                        // is digits. Word tokens like "Iocaine"/"Cotton" still won't qualify
+                        // since they contain non-digit/non-O characters.
+                        string normalized = tok.Replace('O', '0').Replace('o', '0');
+                        if (normalized.Length > 0
+                            && normalized.All(char.IsDigit)
+                            && int.TryParse(normalized, out int n))
+                        {
+                            count = n;
+                            continue;
+                        }
+                        nameTokens.Add(tok);
+                    }
+                    // OCR drops single-digit "0" counts entirely (engine quirk). When the name
+                    // was parsed but no count token was found, default to 0 — that matches
+                    // newly-listed items in PG which start at 0.
+                    if (count is null && nameTokens.Count > 0)
+                    {
+                        count = 0;
+                    }
+                    it.CaptureCount = count;
+                    it.Name = string.Join(' ', nameTokens);
                 }
             }
             catch { }
@@ -215,7 +331,7 @@ public sealed class SidebarReader
                 File.WriteAllLines(
                     Path.Combine(DebugDir, "names.txt"),
                     items.Select(it =>
-                        $"{it.Index}: rowY={it.FrameRect.Y + it.FrameRect.Height / 2} name='{it.Name}'"));
+                        $"{it.Index}: rowY={it.FrameRect.Y + it.FrameRect.Height / 2} count={(it.CaptureCount?.ToString() ?? "-")} captured={it.Captured} name='{it.Name}'"));
                 File.WriteAllLines(
                     Path.Combine(DebugDir, "ocr-lines.txt"),
                     ocrLines.Select(l =>
@@ -225,6 +341,23 @@ public sealed class SidebarReader
         }
 
         return items;
+    }
+
+    private static void AddSegmentRows(List<int> rowCentersY, int scanYOrigin, int segStart, int segEnd, int minLen, int expectedStride)
+    {
+        int len = segEnd - segStart + 1;
+        if (len < minLen) return;
+        // A segment longer than ~1.4x stride likely contains multiple icons (adjacent items
+        // both saturating the column mask). Split into N equal-width sub-rows.
+        int subCount = Math.Max(1, (int)Math.Round(len / (double)expectedStride));
+        int subLen = len / subCount;
+        for (int s = 0; s < subCount; s++)
+        {
+            int subStart = segStart + s * subLen;
+            int subEnd = (s == subCount - 1) ? segEnd : (subStart + subLen - 1);
+            int midLocal = (subStart + subEnd) / 2;
+            rowCentersY.Add(scanYOrigin + midLocal);
+        }
     }
 
     private static OpenCvRect ClampToFrame(OpenCvRect r, OpenCvMat frame)

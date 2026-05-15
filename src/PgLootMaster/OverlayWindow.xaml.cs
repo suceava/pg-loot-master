@@ -192,6 +192,15 @@ public partial class OverlayWindow : Window
                 ? $"PanelLocator: PANEL FOUND at {loc!.Value.TitleBar.X},{loc.Value.TitleBar.Y} confidence={loc.Value.Confidence:F3}; {cells.Count} cells, {clusterCount} clusters"
                 : "PanelLocator: panel lost");
             _lastDetectionSucceeded = found;
+            // When the panel disappears (old game over), drop any leftover displayed state.
+            // The next new game's first valid frame will be treated as the "bootstrap" and
+            // skip the NeedsRecapture gating, so the user sees borders + suggestion quickly.
+            if (!found)
+            {
+                _displayedCells = Array.Empty<OpenCvSharp.Rect>();
+                _displayedClusterIds = Array.Empty<int>();
+                _displayedRecommendation = null;
+            }
         }
         else if (found)
         {
@@ -199,7 +208,17 @@ public partial class OverlayWindow : Window
         }
 
         _latestCells = cells;
-        bool acceptThisFrame = found && clusterCount >= MinAcceptableClusters && cells.Count == BoardExtractor.GridDim * BoardExtractor.GridDim;
+        // Only update the displayed (rendered) state when:
+        //   1) the frame is stable (no animation drift), AND
+        //   2) the clusterer isn't waiting for a canonical recapture
+        //      (between a detected large change and the recapture, cluster IDs are mapped
+        //       against the OLD canonical and are misleading).
+        // Bootstrap exception: if we've never painted, take the first valid frame anyway.
+        bool acceptThisFrame = found
+            && clusterCount >= MinAcceptableClusters
+            && cells.Count == BoardExtractor.GridDim * BoardExtractor.GridDim
+            && ((_cellClusterer.LastFrameWasStable && !_cellClusterer.NeedsRecapture)
+                || _displayedCells.Count == 0);
         if (acceptThisFrame)
         {
             _displayedCells = cells;
@@ -336,6 +355,7 @@ public partial class OverlayWindow : Window
     }
 
     private SwapRecommendation? _previouslyLoggedRecommendation;
+    private int[]? _previouslyLoggedClusterIds;
 
     private SwapRecommendation? TrySolve(int[] clusterIds)
     {
@@ -352,7 +372,10 @@ public partial class OverlayWindow : Window
         bool swapChanged = rec is not null
             && (_previouslyLoggedRecommendation is null
                 || _previouslyLoggedRecommendation.Swap != rec.Swap);
-        if (swapChanged)
+        bool clusterIdsChanged = _previouslyLoggedClusterIds is null
+            || _previouslyLoggedClusterIds.Length != clusterIds.Length
+            || !clusterIds.SequenceEqual(_previouslyLoggedClusterIds);
+        if (swapChanged || clusterIdsChanged)
         {
             int showCount = Math.Min(5, top.Count);
             if (top.Count > 5)
@@ -371,9 +394,13 @@ public partial class OverlayWindow : Window
                 sb.AppendLine("---- ITEMS ----");
                 for (int i = 0; i < _latestSidebarItems.Count; i++)
                 {
-                    string name = _latestSidebarItems[i].Name;
+                    SidebarItem item = _latestSidebarItems[i];
+                    string name = item.Name;
                     if (string.IsNullOrEmpty(name)) name = $"(item {i})";
-                    sb.AppendLine($"  {i}: {name}");
+                    string status = item.Captured
+                        ? "✓"
+                        : (item.CaptureCount?.ToString() ?? "—");
+                    sb.AppendLine($"  {i:D2}: {name} [{status}]");
                 }
             }
             if (_latestClusterToTemplate.Length > 0 && _latestSidebarItems.Count > 0)
@@ -386,7 +413,7 @@ public partial class OverlayWindow : Window
                         ? _latestSidebarItems[t].Name
                         : "(unknown)";
                     if (string.IsNullOrEmpty(name)) name = $"item {t}";
-                    sb.AppendLine($"  cluster {c} -> {name}");
+                    sb.AppendLine($"  {c:D2} -> {name}");
                 }
             }
             sb.AppendLine("---- BOARD (cluster IDs) ----");
@@ -409,6 +436,7 @@ public partial class OverlayWindow : Window
             SolverLog.Write(content);
             Dispatcher.Invoke(() => StatusText.Text = content);
             _previouslyLoggedRecommendation = rec;
+            _previouslyLoggedClusterIds = (int[])clusterIds.Clone();
         }
         return rec;
     }

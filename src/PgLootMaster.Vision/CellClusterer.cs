@@ -50,6 +50,14 @@ public sealed class CellClusterer
     private readonly Queue<byte[][]> _stableFrameBuffer = new();
     private const int StableFrameBufferDepth = 4;
 
+    // Exposed for the caller (OverlayWindow) to freeze display updates while the board is
+    // animating (pulse, cascade, etc). True only when the latest frame is similar enough to
+    // the previous frame to be considered settled.
+    public bool LastFrameWasStable { get; private set; }
+    // True between a detected large change and the next canonical-rep recapture. While true,
+    // the cluster IDs returned are mapped against the OLD canonical and are likely stale.
+    public bool NeedsRecapture => _needsRecapture;
+
     public int[] ClusterCells(OpenCvMat bgrFrame, IReadOnlyList<OpenCvRect> cells)
     {
         if (cells.Count == 0) return Array.Empty<int>();
@@ -168,6 +176,7 @@ public sealed class CellClusterer
             stableIds = GreedyCluster(signatures, out _);
         }
 
+        LastFrameWasStable = isStableFrame;
         _previousSignatures = signatures;
         _previousStableIds = (int[])stableIds.Clone();
         return stableIds;

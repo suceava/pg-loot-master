@@ -15,8 +15,12 @@ internal sealed class PreparedCrop : IDisposable
     // 3×3 center-grid BGR samples: 9 colors at fixed positions in the prepared (48×48) image.
     // Catches items that share overall color but differ at specific spots.
     public Vec3b[] Fingerprint { get; }
+    // Max saturation found anywhere in the foreground mask. Distinguishes items that have a
+    // saturated accent pixel (Mercury's blue dot) from uniformly desaturated items (Winterhue
+    // gray). Single scalar so within-item variance is small.
+    public int MaxSaturation { get; }
 
-    public PreparedCrop(OpenCvMat imageBgr, OpenCvMat imageGray, OpenCvMat mask, OpenCvMat hueHist, Scalar meanLab, double aspectRatio, Vec3b[] fingerprint)
+    public PreparedCrop(OpenCvMat imageBgr, OpenCvMat imageGray, OpenCvMat mask, OpenCvMat hueHist, Scalar meanLab, double aspectRatio, Vec3b[] fingerprint, int maxSaturation)
     {
         ImageBgr = imageBgr;
         ImageGray = imageGray;
@@ -25,6 +29,7 @@ internal sealed class PreparedCrop : IDisposable
         MeanLab = meanLab;
         AspectRatio = aspectRatio;
         Fingerprint = fingerprint;
+        MaxSaturation = maxSaturation;
     }
 
     public void Dispose()
@@ -94,16 +99,18 @@ public sealed class ItemMatcher
             if (identical) return (int[])_previousSplitIds.Clone();
         }
 
-        // Compute hue histograms + mean LAB + 3×3 fingerprint for each cell.
+        // Compute hue histograms + mean LAB + 3×3 fingerprint + max-sat for each cell.
         OpenCvMat[] hists = new OpenCvMat[cells.Count];
         Scalar[] labs = new Scalar[cells.Count];
         Vec3b[][] fingerprints = new Vec3b[cells.Count][];
+        int[] maxSats = new int[cells.Count];
         for (int i = 0; i < cells.Count; i++)
         {
             using PreparedCrop p = PrepareCropFromRect(bgrFrame, cells[i], CellCenterCropFraction);
             hists[i] = p.HueHist.Clone();
             labs[i] = p.MeanLab;
             fingerprints[i] = (Vec3b[])p.Fingerprint.Clone();
+            maxSats[i] = p.MaxSaturation;
         }
 
         int maxId = 0;
@@ -111,18 +118,19 @@ public sealed class ItemMatcher
         int[] result = new int[cells.Count];
         for (int i = 0; i < cells.Count; i++) result[i] = clusterIds[i];
 
+        System.Text.StringBuilder splitLog = new();
+        splitLog.AppendLine($"-- splitter dump @ {DateTime.Now:HH:mm:ss.fff}: {cells.Count} cells --");
         try
         {
             int nextId = maxId + 1;
-            // For each cluster, split off cells that diverge in EITHER hue distribution
-            // (correlation < 0.4) OR mean LAB color (distance > 20 — covers low-saturation
-            // items like Mercury vs Winterhue where hue alone is noisy).
             for (int cid = 0; cid <= maxId; cid++)
             {
                 List<int> members = new();
                 for (int i = 0; i < result.Length; i++) if (result[i] == cid) members.Add(i);
                 if (members.Count < 2) continue;
 
+                int anchorMaxSat = maxSats[members[0]];
+                splitLog.AppendLine($"cluster {cid}: {members.Count} cells, anchor=cell[{members[0] / 7},{members[0] % 7}] maxSat={anchorMaxSat}");
                 OpenCvMat anchorHist = hists[members[0]];
                 Scalar anchorLab = labs[members[0]];
                 List<int> splitOff = new();
@@ -131,16 +139,10 @@ public sealed class ItemMatcher
                 {
                     if (idx == members[0]) continue;
                     double corr = Cv2.CompareHist(anchorHist, hists[idx], HistCompMethods.Correl);
-                    // Use a*/b* (chrominance) only — Mercury vs Winterhue differ in tint, not
-                    // brightness. The L* component would also flag pulsating tiles which we
-                    // don't want to split.
                     double dA = anchorLab.Val1 - labs[idx].Val1;
                     double dB = anchorLab.Val2 - labs[idx].Val2;
                     double chromaDist = Math.Sqrt(dA * dA + dB * dB);
 
-                    // 3×3 fingerprint: max a*/b* (chrominance) distance across the 9 sample
-                    // points. If any point differs in chrominance, items are different. Pulse
-                    // only modulates L*, so it doesn't trigger this check.
                     Vec3b[] fp = fingerprints[idx];
                     double maxFpDist = 0;
                     for (int k = 0; k < 9; k++)
@@ -150,18 +152,72 @@ public sealed class ItemMatcher
                         double d = Math.Sqrt(da * da + db * db);
                         if (d > maxFpDist) maxFpDist = d;
                     }
+                    int maxSatDiff = Math.Abs(anchorMaxSat - maxSats[idx]);
 
-                    // Require either a strongly-different hue distribution, OR chroma AND
-                    // fingerprint BOTH disagree. Single-feature triggers were splitting
-                    // same-item variants (e.g. daisies with different shadow/highlight pixels).
+                    // Triggers:
+                    //  1. Very different hue distribution (corr < 0.3)
+                    //  2. Chroma AND fingerprint both clearly disagree
+                    //  3. Very large fingerprint distance (>25) — single-spot drastic disagreement
+                    //  4. Max-saturation differs significantly (>40): one item has a saturated
+                    //     accent pixel, the other doesn't (Mercury blue accent vs Winterhue gray).
+                    //     Within-item the max-sat is consistent because the accent is present in
+                    //     every cell of the same item.
                     bool veryDifferentHue = corr < 0.3;
                     bool colorAndPointDisagree = chromaDist > 15 && maxFpDist > 30;
-                    if (veryDifferentHue || colorAndPointDisagree) splitOff.Add(idx);
+                    bool drasticPointDisagree = maxFpDist > 25;
+                    bool maxSatDiverges = maxSatDiff > 40;
+                    bool split = veryDifferentHue || colorAndPointDisagree || drasticPointDisagree || maxSatDiverges;
+                    splitLog.AppendLine(
+                        $"  cell[{idx / 7},{idx % 7}] corr={corr:F3} chroma={chromaDist:F1} maxFp={maxFpDist:F1} maxSat={maxSats[idx]} dSat={maxSatDiff} split={split}");
+                    if (split) splitOff.Add(idx);
                 }
                 if (splitOff.Count > 0)
                 {
-                    foreach (int idx in splitOff) result[idx] = nextId;
-                    nextId++;
+                    // Sub-cluster the split-off cells by feature similarity, so multiple
+                    // distinct items mixed into one parent cluster each get their own ID.
+                    // Greedy: for each split-off cell, find a sub-group whose representative
+                    // is close in chroma+fingerprint+maxSat; else start a new sub-group.
+                    List<List<int>> subGroups = new();
+                    foreach (int idx in splitOff)
+                    {
+                        int assigned = -1;
+                        for (int g = 0; g < subGroups.Count; g++)
+                        {
+                            int repIdx = subGroups[g][0];
+                            double dA2 = labs[repIdx].Val1 - labs[idx].Val1;
+                            double dB2 = labs[repIdx].Val2 - labs[idx].Val2;
+                            double chromaDist2 = Math.Sqrt(dA2 * dA2 + dB2 * dB2);
+                            double maxFpDist2 = 0;
+                            for (int k = 0; k < 9; k++)
+                            {
+                                int da = fingerprints[repIdx][k].Item1 - fingerprints[idx][k].Item1;
+                                int db = fingerprints[repIdx][k].Item2 - fingerprints[idx][k].Item2;
+                                double d = Math.Sqrt(da * da + db * db);
+                                if (d > maxFpDist2) maxFpDist2 = d;
+                            }
+                            int dSat2 = Math.Abs(maxSats[repIdx] - maxSats[idx]);
+                            // Close enough to be the same sub-item: features within tight bounds.
+                            if (chromaDist2 < 5 && maxFpDist2 < 15 && dSat2 < 20)
+                            {
+                                assigned = g;
+                                break;
+                            }
+                        }
+                        if (assigned < 0)
+                        {
+                            subGroups.Add(new List<int> { idx });
+                        }
+                        else
+                        {
+                            subGroups[assigned].Add(idx);
+                        }
+                    }
+                    foreach (List<int> group in subGroups)
+                    {
+                        foreach (int idx in group) result[idx] = nextId;
+                        nextId++;
+                    }
+                    splitLog.AppendLine($"  → split into {subGroups.Count} sub-cluster(s) of sizes [{string.Join(",", subGroups.Select(g => g.Count))}]");
                 }
             }
         }
@@ -169,6 +225,13 @@ public sealed class ItemMatcher
         {
             foreach (OpenCvMat h in hists) h.Dispose();
         }
+        try
+        {
+            File.WriteAllText(
+                Path.Combine(Path.GetTempPath(), "pg-loot-master-splitter.log"),
+                splitLog.ToString());
+        }
+        catch { }
 
         _previousSplitIds = (int[])result.Clone();
         _previousInputClusterIds = clusterIds.ToArray();
@@ -278,7 +341,55 @@ public sealed class ItemMatcher
             clusterTaken[bestC] = true;
             templateTaken[bestT] = true;
         }
+
+        // Fallback: for any cluster left unlabeled (more clusters than templates), assign
+        // it the label of the already-labeled cluster whose avg-score vector is closest.
+        // This makes the leftover share a name with its likely visual sibling rather than
+        // showing "(unknown)" — the borders still distinguish them, but the user gets a
+        // best-guess name instead of nothing.
+        for (int c = 0; c < clusterCount; c++)
+        {
+            if (labels[c] != -1) continue;
+            if (cellsPerCluster[c] == 0) continue;
+            int bestOther = -1;
+            double bestSim = double.NegativeInfinity;
+            for (int o = 0; o < clusterCount; o++)
+            {
+                if (o == c || labels[o] < 0 || cellsPerCluster[o] == 0) continue;
+                // Negative L2 distance between score vectors → higher = more similar.
+                double sumSq = 0;
+                for (int t = 0; t < _templatePrepared.Length; t++)
+                {
+                    double d = avgScores[c, t] - avgScores[o, t];
+                    sumSq += d * d;
+                }
+                double sim = -sumSq;
+                if (sim > bestSim) { bestSim = sim; bestOther = o; }
+            }
+            if (bestOther >= 0) labels[c] = labels[bestOther];
+        }
+
         _previousLabels = (int[])labels.Clone();
+
+        try
+        {
+            System.Text.StringBuilder lb = new();
+            lb.AppendLine($"-- labeler dump @ {DateTime.Now:HH:mm:ss.fff}: {clusterCount} clusters, {_templatePrepared.Length} templates --");
+            for (int c = 0; c < clusterCount; c++)
+            {
+                if (cellsPerCluster[c] == 0) { lb.AppendLine($"cluster {c}: 0 cells (unused)"); continue; }
+                lb.Append($"cluster {c}: {cellsPerCluster[c]} cells, label={labels[c]} scores=[");
+                for (int t = 0; t < _templatePrepared.Length; t++)
+                {
+                    lb.Append(avgScores[c, t].ToString("F3"));
+                    if (t + 1 < _templatePrepared.Length) lb.Append(", ");
+                }
+                lb.AppendLine("]");
+            }
+            File.WriteAllText(Path.Combine(Path.GetTempPath(), "pg-loot-master-labeler.log"), lb.ToString());
+        }
+        catch { }
+
         return labels;
     }
 
@@ -429,7 +540,7 @@ public sealed class ItemMatcher
         OpenCvMat gray = new(MatchSize, MatchSize, MatType.CV_8UC1, Scalar.All(0));
         OpenCvMat mask = new(MatchSize, MatchSize, MatType.CV_8UC1, Scalar.All(0));
         OpenCvMat hist = new(HueBins, 1, MatType.CV_32FC1, Scalar.All(0));
-        return new PreparedCrop(bgr, gray, mask, hist, new Scalar(0, 0, 0), 1.0, new Vec3b[9]);
+        return new PreparedCrop(bgr, gray, mask, hist, new Scalar(0, 0, 0), 1.0, new Vec3b[9], 0);
     }
 
     private static PreparedCrop TightCropAndPrepare(OpenCvMat crop)
@@ -548,7 +659,26 @@ public sealed class ItemMatcher
         // Aspect ratio of the tight bbox — captures elongated vs square shapes.
         double aspect = tight.Height > 0 ? (double)tight.Width / tight.Height : 1.0;
 
-        return new PreparedCrop(resizedBgr, resizedGray, resizedMask, hueHist, meanLab, aspect, fingerprintEarly);
+        // Max saturation among foreground pixels. Items with a small saturated accent
+        // (Mercury's blue dot) have a high max-sat (~100+) even though their mean-sat
+        // and mean-color are similar to fully desaturated items (Winterhue gray).
+        int maxSat = 0;
+        {
+            using OpenCvMat tightHsvOnly = new();
+            Cv2.CvtColor(tightImage, tightHsvOnly, ColorConversionCodes.BGR2HSV);
+            OpenCvMat[] channels = Cv2.Split(tightHsvOnly);
+            try
+            {
+                Cv2.MinMaxLoc(channels[1], out _, out double maxVal, out _, out _, tightMask);
+                maxSat = (int)maxVal;
+            }
+            finally
+            {
+                foreach (OpenCvMat ch in channels) ch.Dispose();
+            }
+        }
+
+        return new PreparedCrop(resizedBgr, resizedGray, resizedMask, hueHist, meanLab, aspect, fingerprintEarly, maxSat);
     }
 
     private static OpenCvRect ClampRect(OpenCvRect r, int width, int height)
