@@ -62,6 +62,10 @@ public partial class OverlayWindow : Window
     private readonly ItemMatcher _itemMatcher = new();
     private IReadOnlyList<SidebarItem> _latestSidebarItems = Array.Empty<SidebarItem>();
     private int[] _latestClusterToTemplate = Array.Empty<int>();
+    // Set by App.OnStartup so the overlay can push sidebar updates to the toolbar's target
+    // dropdown without holding a direct reference to ToolbarWindow.
+    public Action<IReadOnlyList<SidebarItem>>? OnSidebarItemsChanged { get; set; }
+    private int _lastSidebarSignature;
     private static readonly System.Windows.Media.Color[] ClusterColors = new[]
     {
         System.Windows.Media.Color.FromRgb(255, 64, 64),
@@ -148,6 +152,14 @@ public partial class OverlayWindow : Window
                     if (cells.Count == BoardExtractor.GridDim * BoardExtractor.GridDim)
                     {
                         _latestSidebarItems = _sidebarReader.ReadItems(bgrFrame, loc.Value.TitleBar);
+                        // Push to toolbar if the item set changed (names + captured flags).
+                        int sig = ComputeSidebarSignature(_latestSidebarItems);
+                        if (sig != _lastSidebarSignature)
+                        {
+                            _lastSidebarSignature = sig;
+                            IReadOnlyList<SidebarItem> snapshot = _latestSidebarItems;
+                            Dispatcher.BeginInvoke(() => OnSidebarItemsChanged?.Invoke(snapshot));
+                        }
                         // Borders are keyed by the cell clusterer (proven to give unique IDs per
                         // visually-distinct item). The ItemMatcher only labels each cluster with
                         // a sidebar item name for display — if its label is wrong, the borders
@@ -208,17 +220,15 @@ public partial class OverlayWindow : Window
         }
 
         _latestCells = cells;
-        // Only update the displayed (rendered) state when:
-        //   1) the frame is stable (no animation drift), AND
-        //   2) the clusterer isn't waiting for a canonical recapture
-        //      (between a detected large change and the recapture, cluster IDs are mapped
-        //       against the OLD canonical and are misleading).
-        // Bootstrap exception: if we've never painted, take the first valid frame anyway.
+        // Display gate: update as soon as the cascade visually settles (LastFrameWasStable).
+        // We deliberately do NOT wait for the canonical recapture — sticky cluster IDs
+        // against the previous canonical are approximately right and the user wants the
+        // recommendation visible quickly after a move (before PG's pulse hint starts).
+        // Bootstrap exception: first frame after panel-lost goes through immediately.
         bool acceptThisFrame = found
             && clusterCount >= MinAcceptableClusters
             && cells.Count == BoardExtractor.GridDim * BoardExtractor.GridDim
-            && ((_cellClusterer.LastFrameWasStable && !_cellClusterer.NeedsRecapture)
-                || _displayedCells.Count == 0);
+            && (_cellClusterer.LastFrameWasStable || _displayedCells.Count == 0);
         if (acceptThisFrame)
         {
             _displayedCells = cells;
@@ -304,6 +314,80 @@ public partial class OverlayWindow : Window
         SuggestionCanvas.Children.Add(r);
     }
 
+    private SolverContext? BuildSolverContext(int[] clusterIds)
+    {
+        // Always pass TurnsLeft when known, even when there's no target — it affects the
+        // 4-match / 5-match turn bonuses for general scoring.
+        int? turnsLeft = _sidebarReader.TurnsLeft;
+        string? targetName = OverlaySettings.Instance.TargetItemName;
+        if (string.IsNullOrEmpty(targetName))
+        {
+            return turnsLeft is null ? null : new SolverContext { TurnsLeft = turnsLeft };
+        }
+        if (_latestSidebarItems.Count == 0 || _latestClusterToTemplate.Length == 0) return null;
+        if (_sidebarReader.CaptureThreshold is not int threshold) return null;
+
+        // Find the template index whose Name matches the user's target.
+        int targetTemplateIdx = -1;
+        for (int i = 0; i < _latestSidebarItems.Count; i++)
+        {
+            if (_latestSidebarItems[i].Name == targetName)
+            {
+                targetTemplateIdx = i;
+                break;
+            }
+        }
+        if (targetTemplateIdx < 0) return null;
+
+        // Find which cluster id maps to that template.
+        int? targetClusterId = null;
+        for (int c = 0; c < _latestClusterToTemplate.Length; c++)
+        {
+            if (_latestClusterToTemplate[c] == targetTemplateIdx)
+            {
+                targetClusterId = c;
+                break;
+            }
+        }
+        if (targetClusterId is null) return null;
+
+        // Map each cluster id → its template's CaptureCount.
+        Dictionary<int, int> counts = new();
+        for (int c = 0; c < _latestClusterToTemplate.Length; c++)
+        {
+            int t = _latestClusterToTemplate[c];
+            if (t >= 0 && t < _latestSidebarItems.Count
+                && _latestSidebarItems[t].CaptureCount is int count)
+            {
+                counts[c] = count;
+            }
+        }
+
+        return new SolverContext
+        {
+            TargetTypeId = targetClusterId,
+            CaptureThreshold = threshold,
+            CurrentCounts = counts,
+            TurnsLeft = turnsLeft,
+        };
+    }
+
+    private static int ComputeSidebarSignature(IReadOnlyList<SidebarItem> items)
+    {
+        // Hash of names+captured flags. Counts intentionally excluded so we don't refresh the
+        // toolbar dropdown every time a match increments a counter.
+        unchecked
+        {
+            int hash = 17;
+            foreach (SidebarItem it in items)
+            {
+                hash = hash * 31 + (it.Name?.GetHashCode() ?? 0);
+                hash = hash * 31 + (it.Captured ? 1 : 0);
+            }
+            return hash;
+        }
+    }
+
     private void ApplySettings()
     {
         StatusBorder.Visibility = OverlaySettings.Instance.ShowDebugTextWindow
@@ -356,6 +440,7 @@ public partial class OverlayWindow : Window
 
     private SwapRecommendation? _previouslyLoggedRecommendation;
     private int[]? _previouslyLoggedClusterIds;
+    private string? _previouslyLoggedTargetName;
 
     private SwapRecommendation? TrySolve(int[] clusterIds)
     {
@@ -368,14 +453,16 @@ public partial class OverlayWindow : Window
                 grid[r, c] = clusterIds[r * SolverBoard.Dim + c];
             }
         }
-        SwapRecommendation? rec = PgLootMaster.Solver.Solver.FindBestSwap(new SolverBoard(grid), out List<SwapRecommendation> top);
+        SolverContext? solverContext = BuildSolverContext(clusterIds);
+        SwapRecommendation? rec = PgLootMaster.Solver.Solver.FindBestSwap(new SolverBoard(grid), out List<SwapRecommendation> top, solverContext);
         bool swapChanged = rec is not null
             && (_previouslyLoggedRecommendation is null
                 || _previouslyLoggedRecommendation.Swap != rec.Swap);
         bool clusterIdsChanged = _previouslyLoggedClusterIds is null
             || _previouslyLoggedClusterIds.Length != clusterIds.Length
             || !clusterIds.SequenceEqual(_previouslyLoggedClusterIds);
-        if (swapChanged || clusterIdsChanged)
+        bool targetChanged = OverlaySettings.Instance.TargetItemName != _previouslyLoggedTargetName;
+        if (swapChanged || clusterIdsChanged || targetChanged)
         {
             int showCount = Math.Min(5, top.Count);
             if (top.Count > 5)
@@ -391,6 +478,8 @@ public partial class OverlayWindow : Window
             System.Text.StringBuilder sb = new();
             if (_latestSidebarItems.Count > 0)
             {
+                string? targetName = OverlaySettings.Instance.TargetItemName;
+                int? threshold = _sidebarReader.CaptureThreshold;
                 sb.AppendLine("---- ITEMS ----");
                 for (int i = 0; i < _latestSidebarItems.Count; i++)
                 {
@@ -399,8 +488,13 @@ public partial class OverlayWindow : Window
                     if (string.IsNullOrEmpty(name)) name = $"(item {i})";
                     string status = item.Captured
                         ? "✓"
-                        : (item.CaptureCount?.ToString() ?? "—");
-                    sb.AppendLine($"  {i:D2}: {name} [{status}]");
+                        : threshold is int thr
+                            ? $"{item.CaptureCount ?? 0}/{thr}"
+                            : (item.CaptureCount?.ToString() ?? "—");
+                    string marker = !string.IsNullOrEmpty(targetName) && item.Name == targetName
+                        ? " ← TARGET"
+                        : "";
+                    sb.AppendLine($"  {i:D2}: {name} [{status}]{marker}");
                 }
             }
             if (_latestClusterToTemplate.Length > 0 && _latestSidebarItems.Count > 0)
@@ -437,6 +531,7 @@ public partial class OverlayWindow : Window
             Dispatcher.Invoke(() => StatusText.Text = content);
             _previouslyLoggedRecommendation = rec;
             _previouslyLoggedClusterIds = (int[])clusterIds.Clone();
+            _previouslyLoggedTargetName = OverlaySettings.Instance.TargetItemName;
         }
         return rec;
     }

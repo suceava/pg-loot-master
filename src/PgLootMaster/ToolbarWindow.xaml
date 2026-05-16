@@ -23,6 +23,17 @@
                        FontSize="12"
                        VerticalAlignment="Center"
                        Margin="4,0,12,0" />
+            <TextBlock Text="Target:"
+                       Foreground="#FFCCCCCC"
+                       FontFamily="Consolas"
+                       FontSize="11"
+                       VerticalAlignment="Center"
+                       Margin="0,0,4,0" />
+            <ComboBox x:Name="TargetComboBox"
+                      Width="180" Height="24"
+                      FontSize="11"
+                      Margin="0,0,12,0"
+                      SelectionChanged="OnTargetChanged" />
             <Button x:Name="SettingsButton"
                     Content="Settings"
                     Width="60" Height="24"

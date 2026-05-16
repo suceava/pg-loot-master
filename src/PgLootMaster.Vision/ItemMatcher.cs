@@ -19,8 +19,11 @@ internal sealed class PreparedCrop : IDisposable
     // saturated accent pixel (Mercury's blue dot) from uniformly desaturated items (Winterhue
     // gray). Single scalar so within-item variance is small.
     public int MaxSaturation { get; }
+    // 7 log-transformed Hu moments of the icon's foreground mask. Captures shape invariants
+    // (translation/scale/rotation independent) — discriminates flower vs flask vs gem etc.
+    public double[] HuMoments { get; }
 
-    public PreparedCrop(OpenCvMat imageBgr, OpenCvMat imageGray, OpenCvMat mask, OpenCvMat hueHist, Scalar meanLab, double aspectRatio, Vec3b[] fingerprint, int maxSaturation)
+    public PreparedCrop(OpenCvMat imageBgr, OpenCvMat imageGray, OpenCvMat mask, OpenCvMat hueHist, Scalar meanLab, double aspectRatio, Vec3b[] fingerprint, int maxSaturation, double[] huMoments)
     {
         ImageBgr = imageBgr;
         ImageGray = imageGray;
@@ -30,6 +33,7 @@ internal sealed class PreparedCrop : IDisposable
         AspectRatio = aspectRatio;
         Fingerprint = fingerprint;
         MaxSaturation = maxSaturation;
+        HuMoments = huMoments;
     }
 
     public void Dispose()
@@ -54,6 +58,7 @@ public sealed class ItemMatcher
     private PreparedCrop[] _templatePrepared = Array.Empty<PreparedCrop>();
     private IReadOnlyList<SidebarItem> _templates = Array.Empty<SidebarItem>();
     private int[]? _previousLabels;
+    private int[]? _previousLabelLogIds;
     // Per-cell-index cache of the SPLIT outcome: clusterIdAtSplit[cellIdx] = final cluster id
     // assigned to that cell. Reused across frames so pulse-induced fingerprint jitter doesn't
     // flip a cell between sub-clusters.
@@ -252,6 +257,12 @@ public sealed class ItemMatcher
         int clusterCount = maxClusterId + 1;
 
         double[,] sumScores = new double[clusterCount, _templatePrepared.Length];
+        // Per-feature accumulators for diagnostic logging.
+        double[,] sumHue = new double[clusterCount, _templatePrepared.Length];
+        double[,] sumLab = new double[clusterCount, _templatePrepared.Length];
+        double[,] sumNcc = new double[clusterCount, _templatePrepared.Length];
+        double[,] sumAspect = new double[clusterCount, _templatePrepared.Length];
+        double[,] sumHu = new double[clusterCount, _templatePrepared.Length];
         int[] cellsPerCluster = new int[clusterCount];
 
         for (int i = 0; i < cells.Count; i++)
@@ -266,7 +277,15 @@ public sealed class ItemMatcher
                 double lab = LabColorScore(cellPrepared, _templatePrepared[t]);
                 double ncc = NccScore(cellPrepared, _templatePrepared[t]);
                 double aspect = AspectRatioScore(cellPrepared, _templatePrepared[t]);
-                sumScores[cid, t] += 0.3 * hue + 0.3 * lab + 0.15 * ncc + 0.25 * aspect;
+                double hu = HuMomentScore(cellPrepared, _templatePrepared[t]);
+                // Original user-validated weights. Hu kept at 0 weight since it produces
+                // near-binary (useless) scores at 48×48 mask resolution.
+                sumScores[cid, t] += 0.3 * hue + 0.3 * lab + 0.15 * ncc + 0.25 * aspect + 0.0 * hu;
+                sumHue[cid, t] += hue;
+                sumLab[cid, t] += lab;
+                sumNcc[cid, t] += ncc;
+                sumAspect[cid, t] += aspect;
+                sumHu[cid, t] += hu;
             }
         }
 
@@ -371,19 +390,43 @@ public sealed class ItemMatcher
 
         _previousLabels = (int[])labels.Clone();
 
+        // Only dump diagnostic log when labels actually changed (or first time). Otherwise the
+        // file IO every frame adds latency to swap recommendations.
+        bool labelsChanged = _previousLabelLogIds is null
+            || _previousLabelLogIds.Length != labels.Length
+            || !labels.SequenceEqual(_previousLabelLogIds);
+        if (!labelsChanged) return labels;
+        _previousLabelLogIds = (int[])labels.Clone();
+
         try
         {
             System.Text.StringBuilder lb = new();
-            lb.AppendLine($"-- labeler dump @ {DateTime.Now:HH:mm:ss.fff}: {clusterCount} clusters, {_templatePrepared.Length} templates --");
+            lb.AppendLine($"-- labeler dump @ {DateTime.Now:HH:mm:ss.fff}: {clusterCount} clusters, {_templatePrepared.Length} templates (weights: hue 0.30, lab 0.30, ncc 0.15, aspect 0.25, hu 0.0) --");
             for (int c = 0; c < clusterCount; c++)
             {
                 if (cellsPerCluster[c] == 0) { lb.AppendLine($"cluster {c}: 0 cells (unused)"); continue; }
-                lb.Append($"cluster {c}: {cellsPerCluster[c]} cells, label={labels[c]} scores=[");
+                lb.Append($"cluster {c}: {cellsPerCluster[c]} cells, label={labels[c]} total=[");
                 for (int t = 0; t < _templatePrepared.Length; t++)
                 {
                     lb.Append(avgScores[c, t].ToString("F3"));
                     if (t + 1 < _templatePrepared.Length) lb.Append(", ");
                 }
+                lb.AppendLine("]");
+                int cnt = cellsPerCluster[c];
+                lb.Append("  hue=[");
+                for (int t = 0; t < _templatePrepared.Length; t++) { lb.Append((sumHue[c, t] / cnt).ToString("F2")); if (t + 1 < _templatePrepared.Length) lb.Append(", "); }
+                lb.AppendLine("]");
+                lb.Append("  lab=[");
+                for (int t = 0; t < _templatePrepared.Length; t++) { lb.Append((sumLab[c, t] / cnt).ToString("F2")); if (t + 1 < _templatePrepared.Length) lb.Append(", "); }
+                lb.AppendLine("]");
+                lb.Append("  ncc=[");
+                for (int t = 0; t < _templatePrepared.Length; t++) { lb.Append((sumNcc[c, t] / cnt).ToString("F2")); if (t + 1 < _templatePrepared.Length) lb.Append(", "); }
+                lb.AppendLine("]");
+                lb.Append("  asp=[");
+                for (int t = 0; t < _templatePrepared.Length; t++) { lb.Append((sumAspect[c, t] / cnt).ToString("F2")); if (t + 1 < _templatePrepared.Length) lb.Append(", "); }
+                lb.AppendLine("]");
+                lb.Append("  hu =[");
+                for (int t = 0; t < _templatePrepared.Length; t++) { lb.Append((sumHu[c, t] / cnt).ToString("F2")); if (t + 1 < _templatePrepared.Length) lb.Append(", "); }
                 lb.AppendLine("]");
             }
             File.WriteAllText(Path.Combine(Path.GetTempPath(), "pg-loot-master-labeler.log"), lb.ToString());
@@ -487,6 +530,21 @@ public sealed class ItemMatcher
         return Math.Max(0, 1.0 - (ratio - 1.0));
     }
 
+    // Hu moments shape similarity. Invariant to translation/scale/rotation.
+    // Lower L2 distance between log-Hu vectors → more similar shape.
+    private static double HuMomentScore(PreparedCrop cell, PreparedCrop template)
+    {
+        double sumSq = 0;
+        for (int i = 0; i < 7; i++)
+        {
+            double d = cell.HuMoments[i] - template.HuMoments[i];
+            sumSq += d * d;
+        }
+        double dist = Math.Sqrt(sumSq);
+        // Distances commonly fall in 0..3. Map to similarity in [0, 1].
+        return Math.Max(0, 1.0 - dist / 3.0);
+    }
+
     // Normalized cross-correlation on grayscale image. Captures shape structure.
     private static double NccScore(PreparedCrop cell, PreparedCrop template)
     {
@@ -540,7 +598,7 @@ public sealed class ItemMatcher
         OpenCvMat gray = new(MatchSize, MatchSize, MatType.CV_8UC1, Scalar.All(0));
         OpenCvMat mask = new(MatchSize, MatchSize, MatType.CV_8UC1, Scalar.All(0));
         OpenCvMat hist = new(HueBins, 1, MatType.CV_32FC1, Scalar.All(0));
-        return new PreparedCrop(bgr, gray, mask, hist, new Scalar(0, 0, 0), 1.0, new Vec3b[9], 0);
+        return new PreparedCrop(bgr, gray, mask, hist, new Scalar(0, 0, 0), 1.0, new Vec3b[9], 0, new double[7]);
     }
 
     private static PreparedCrop TightCropAndPrepare(OpenCvMat crop)
@@ -678,7 +736,22 @@ public sealed class ItemMatcher
             }
         }
 
-        return new PreparedCrop(resizedBgr, resizedGray, resizedMask, hueHist, meanLab, aspect, fingerprintEarly, maxSat);
+        // Hu moments of the icon's shape (from resized mask). Translation/scale/rotation
+        // invariant — captures shape regardless of orientation. Log-transform for stability.
+        double[] huMoments = new double[7];
+        try
+        {
+            Moments mom = Cv2.Moments(resizedMask, binaryImage: true);
+            double[] rawHu = mom.HuMoments();
+            for (int i = 0; i < 7; i++)
+            {
+                double abs = Math.Abs(rawHu[i]);
+                huMoments[i] = -Math.Sign(rawHu[i]) * Math.Log10(abs + 1e-10);
+            }
+        }
+        catch { /* leave as zeros */ }
+
+        return new PreparedCrop(resizedBgr, resizedGray, resizedMask, hueHist, meanLab, aspect, fingerprintEarly, maxSat, huMoments);
     }
 
     private static OpenCvRect ClampRect(OpenCvRect r, int width, int height)

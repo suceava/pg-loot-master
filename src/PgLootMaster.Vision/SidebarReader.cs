@@ -47,6 +47,13 @@ public sealed class SidebarReader
 
     private readonly SidebarOcr _ocr = new();
 
+    // Shared "next item with N matches is yours to keep!" threshold, parsed from sidebar OCR.
+    // null until first successful read.
+    public int? CaptureThreshold { get; private set; }
+
+    // Number from the "Turns Left:" header row. null until first successful read.
+    public int? TurnsLeft { get; private set; }
+
     public IReadOnlyList<SidebarItem> ReadItems(OpenCvMat bgrFrame, OpenCvRect titleBar)
     {
         OpenCvRect sidebarRect = new(
@@ -239,6 +246,54 @@ public sealed class SidebarReader
                 using OpenCvMat sidebarCropForOcr = new(bgrFrame, sidebarRect);
                 ocrLines = _ocr.Recognize(sidebarCropForOcr);
                 List<OcrLine> sorted = ocrLines.OrderBy(l => l.Bbox.Y).ToList();
+
+                // Parse the shared capture threshold from the header help text.
+                // Text varies slightly between captures: "the next item with 30 matches is".
+                // Look for an integer followed by "matches" anywhere in the OCR text.
+                System.Text.RegularExpressions.Regex thresholdRe = new(@"(\d+)\s*matches");
+                foreach (OcrLine line in sorted)
+                {
+                    System.Text.RegularExpressions.Match m = thresholdRe.Match(line.Text);
+                    if (m.Success && int.TryParse(m.Groups[1].Value, out int n))
+                    {
+                        CaptureThreshold = n;
+                        break;
+                    }
+                }
+
+                // Parse "Turns Left: N". OCR reads label as "Irns Left:" or similar; the
+                // digit value is on a separate line at similar Y but further right (x≈230).
+                // Find the label line by case-insensitive "left" match, then find a digit-only
+                // OCR line whose Y center is within ~12px of the label.
+                OcrLine? turnsLeftLabel = null;
+                foreach (OcrLine line in sorted)
+                {
+                    if (line.Text.IndexOf("left", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        turnsLeftLabel = line;
+                        break;
+                    }
+                }
+                if (turnsLeftLabel is not null)
+                {
+                    int labelYCenter = turnsLeftLabel.Bbox.Y + turnsLeftLabel.Bbox.Height / 2;
+                    foreach (OcrLine line in sorted)
+                    {
+                        if (line == turnsLeftLabel) continue;
+                        int lineYCenter = line.Bbox.Y + line.Bbox.Height / 2;
+                        if (Math.Abs(lineYCenter - labelYCenter) > 12) continue;
+                        // Replace OCR's letter-O confusion with 0, then check for all-digits.
+                        string normalized = line.Text.Trim().Replace('O', '0').Replace('o', '0');
+                        if (normalized.Length > 0
+                            && normalized.All(char.IsDigit)
+                            && int.TryParse(normalized, out int turns))
+                        {
+                            TurnsLeft = turns;
+                            break;
+                        }
+                    }
+                }
+
                 foreach (OcrLine line in sorted)
                 {
                     int lineYInFrame = sidebarRect.Y + line.Bbox.Y + line.Bbox.Height / 2;

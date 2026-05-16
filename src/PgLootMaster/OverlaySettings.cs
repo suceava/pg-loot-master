@@ -44,6 +44,16 @@ public sealed class OverlaySettings : INotifyPropertyChanged
         set => Set(ref _toolbarTop, value);
     }
 
+    // Name of the item the user has chosen to optimize captures for. The solver applies a
+    // 5× score multiplier to matches of this item and penalizes swaps that would capture
+    // a different item first. Null or empty means general (score-maximizing) optimization.
+    private string? _targetItemName;
+    public string? TargetItemName
+    {
+        get => _targetItemName;
+        set => Set(ref _targetItemName, value);
+    }
+
     public event PropertyChangedEventHandler? PropertyChanged;
 
     private void Set<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
