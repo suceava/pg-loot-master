@@ -12,7 +12,9 @@
   </ItemGroup>
 
   <ItemGroup>
-    <Content Include="..\..\samples\templates\panel-title.png" Link="Templates\panel-title.png">
+    <!-- Copy every panel-title*.png template so PanelLocator picks them up. Drop a new
+         file (e.g. panel-title-cashfall.png) into samples/templates/ to add a variant. -->
+    <Content Include="..\..\samples\templates\panel-title*.png" Link="Templates\%(Filename)%(Extension)">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </Content>
   </ItemGroup>

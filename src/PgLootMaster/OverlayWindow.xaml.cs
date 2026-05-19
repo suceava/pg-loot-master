@@ -106,10 +106,10 @@ public partial class OverlayWindow : Window
             TimeSpan.FromSeconds(1));
         _captureCoordinator.FrameArrived += _debugFrameSink.Accept;
 
-        string templatePath = System.IO.Path.Combine(AppContext.BaseDirectory, "Templates", "panel-title.png");
-        _panelLocator = new PanelLocator(templatePath);
+        string templateDir = System.IO.Path.Combine(AppContext.BaseDirectory, "Templates");
+        _panelLocator = new PanelLocator(templateDir);
         _captureCoordinator.FrameArrived += OnFrameForPanelDetection;
-        OverlayLog.Write($"PanelLocator loaded template from {templatePath}");
+        OverlayLog.Write($"PanelLocator loaded templates: {string.Join(", ", _panelLocator.TemplateNames)} from {templateDir}");
 
 
         Closed += (_, _) =>
