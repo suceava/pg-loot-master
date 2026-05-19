@@ -24,6 +24,14 @@ Working end-to-end. Live overlay tracks PG's Loot Master panel, recognizes the 7
     ```
     Blank window appears = ready. Delete the folder afterward.
 
+## Building a distributable .exe
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\publish.ps1
+```
+
+Produces `dist\PgLootMaster.exe` (~270 MB — bundled .NET runtime + OpenCV native libs) plus `dist\Templates\` holding the panel-title images. Copy the whole `dist\` folder to use the tool on another Windows machine; no .NET install required.
+
 ## Repo conventions
 
 - Plan-of-record lives in `PLAN.md` at repo root.

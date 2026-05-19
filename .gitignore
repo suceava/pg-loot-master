@@ -33,6 +33,7 @@ packages/
 
 # Publish output
 publish/
+dist/
 
 # App-specific
 debug-frames/
