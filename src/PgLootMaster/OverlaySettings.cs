@@ -16,14 +16,14 @@ public sealed class OverlaySettings : INotifyPropertyChanged
 
     private bool _suppressSave;
 
-    private bool _showBoardOverlay = true;
+    private bool _showBoardOverlay = false;
     public bool ShowBoardOverlay
     {
         get => _showBoardOverlay;
         set => Set(ref _showBoardOverlay, value);
     }
 
-    private bool _showDebugTextWindow = true;
+    private bool _showDebugTextWindow = false;
     public bool ShowDebugTextWindow
     {
         get => _showDebugTextWindow;
