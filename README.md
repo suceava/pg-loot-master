@@ -32,6 +32,14 @@ powershell -ExecutionPolicy Bypass -File .\publish.ps1
 
 Produces `dist\PgLootMaster.exe` (~270 MB — bundled .NET runtime + OpenCV native libs) plus `dist\Templates\` holding the panel-title images. Copy the whole `dist\` folder to use the tool on another Windows machine; no .NET install required.
 
+## Publishing a GitHub release
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\publish.ps1 -Release v1.0.0
+```
+
+Builds, zips `PgLootMaster.exe` + `Templates\` into `dist\PgLootMaster-windows.zip`, and creates a GitHub release at the given tag (e.g. `v1.0.0`) with that zip as the asset. Requires `gh` CLI to be installed and authenticated. Release notes auto-generated from commits since the previous tag — override with `-Notes "..."`.
+
 ## Repo conventions
 
 - Plan-of-record lives in `PLAN.md` at repo root.
