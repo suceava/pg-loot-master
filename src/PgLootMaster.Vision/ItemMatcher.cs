@@ -22,8 +22,13 @@ internal sealed class PreparedCrop : IDisposable
     // 7 log-transformed Hu moments of the icon's foreground mask. Captures shape invariants
     // (translation/scale/rotation independent) — discriminates flower vs flask vs gem etc.
     public double[] HuMoments { get; }
+    // 2D histogram of (a*, b*) values for foreground pixels. Captures color DISTRIBUTION
+    // (multi-color makeup) — discriminates icons with similar mean color but different
+    // color compositions (e.g. flower with yellow center + green leaves vs flask with
+    // red liquid + gold trim).
+    public OpenCvMat ChromaHist { get; }
 
-    public PreparedCrop(OpenCvMat imageBgr, OpenCvMat imageGray, OpenCvMat mask, OpenCvMat hueHist, Scalar meanLab, double aspectRatio, Vec3b[] fingerprint, int maxSaturation, double[] huMoments)
+    public PreparedCrop(OpenCvMat imageBgr, OpenCvMat imageGray, OpenCvMat mask, OpenCvMat hueHist, Scalar meanLab, double aspectRatio, Vec3b[] fingerprint, int maxSaturation, double[] huMoments, OpenCvMat chromaHist)
     {
         ImageBgr = imageBgr;
         ImageGray = imageGray;
@@ -34,6 +39,7 @@ internal sealed class PreparedCrop : IDisposable
         Fingerprint = fingerprint;
         MaxSaturation = maxSaturation;
         HuMoments = huMoments;
+        ChromaHist = chromaHist;
     }
 
     public void Dispose()
@@ -41,6 +47,7 @@ internal sealed class PreparedCrop : IDisposable
         ImageBgr.Dispose();
         ImageGray.Dispose();
         Mask.Dispose();
+        ChromaHist.Dispose();
         HueHist.Dispose();
     }
 }
@@ -58,13 +65,17 @@ public sealed class ItemMatcher
     private PreparedCrop[] _templatePrepared = Array.Empty<PreparedCrop>();
     private IReadOnlyList<SidebarItem> _templates = Array.Empty<SidebarItem>();
     private int[]? _previousLabels;
+    // Per-cluster-ID memory: clusterId → previously assigned template index. Survives
+    // cluster count changes (unlike the array-indexed _previousLabels). Used for hysteresis
+    // so labels don't flip when scores fluctuate slightly within stable-board noise.
+    private readonly Dictionary<int, int> _lastLabelByClusterId = new();
     private int[]? _previousLabelLogIds;
     // Per-cell-index cache of the SPLIT outcome: clusterIdAtSplit[cellIdx] = final cluster id
     // assigned to that cell. Reused across frames so pulse-induced fingerprint jitter doesn't
     // flip a cell between sub-clusters.
     private int[]? _previousSplitIds;
     private int[]? _previousInputClusterIds;
-    private const double HysteresisMargin = 0.04;
+    private const double HysteresisMargin = 0.10;
 
     public IReadOnlyList<SidebarItem> Templates => _templates;
     public int TemplateCount => _templatePrepared.Length;
@@ -263,6 +274,7 @@ public sealed class ItemMatcher
         double[,] sumNcc = new double[clusterCount, _templatePrepared.Length];
         double[,] sumAspect = new double[clusterCount, _templatePrepared.Length];
         double[,] sumHu = new double[clusterCount, _templatePrepared.Length];
+        double[,] sumChroma = new double[clusterCount, _templatePrepared.Length];
         int[] cellsPerCluster = new int[clusterCount];
 
         for (int i = 0; i < cells.Count; i++)
@@ -278,14 +290,16 @@ public sealed class ItemMatcher
                 double ncc = NccScore(cellPrepared, _templatePrepared[t]);
                 double aspect = AspectRatioScore(cellPrepared, _templatePrepared[t]);
                 double hu = HuMomentScore(cellPrepared, _templatePrepared[t]);
-                // Original user-validated weights. Hu kept at 0 weight since it produces
-                // near-binary (useless) scores at 48×48 mask resolution.
-                sumScores[cid, t] += 0.3 * hue + 0.3 * lab + 0.15 * ncc + 0.25 * aspect + 0.0 * hu;
+                double chroma = ChromaHistScore(cellPrepared, _templatePrepared[t]);
+                // Chroma histogram replaces mean-LAB's role as the primary color feature.
+                // It captures color DISTRIBUTION (multi-color icons separate cleanly).
+                sumScores[cid, t] += 0.20 * hue + 0.10 * lab + 0.10 * ncc + 0.10 * aspect + 0.0 * hu + 0.50 * chroma;
                 sumHue[cid, t] += hue;
                 sumLab[cid, t] += lab;
                 sumNcc[cid, t] += ncc;
                 sumAspect[cid, t] += aspect;
                 sumHu[cid, t] += hu;
+                sumChroma[cid, t] += chroma;
             }
         }
 
@@ -401,7 +415,7 @@ public sealed class ItemMatcher
         try
         {
             System.Text.StringBuilder lb = new();
-            lb.AppendLine($"-- labeler dump @ {DateTime.Now:HH:mm:ss.fff}: {clusterCount} clusters, {_templatePrepared.Length} templates (weights: hue 0.30, lab 0.30, ncc 0.15, aspect 0.25, hu 0.0) --");
+            lb.AppendLine($"-- labeler dump @ {DateTime.Now:HH:mm:ss.fff}: {clusterCount} clusters, {_templatePrepared.Length} templates (weights: hue 0.20, lab 0.10, ncc 0.10, aspect 0.10, hu 0.0, chroma 0.50) --");
             for (int c = 0; c < clusterCount; c++)
             {
                 if (cellsPerCluster[c] == 0) { lb.AppendLine($"cluster {c}: 0 cells (unused)"); continue; }
@@ -427,6 +441,9 @@ public sealed class ItemMatcher
                 lb.AppendLine("]");
                 lb.Append("  hu =[");
                 for (int t = 0; t < _templatePrepared.Length; t++) { lb.Append((sumHu[c, t] / cnt).ToString("F2")); if (t + 1 < _templatePrepared.Length) lb.Append(", "); }
+                lb.AppendLine("]");
+                lb.Append("  chr=[");
+                for (int t = 0; t < _templatePrepared.Length; t++) { lb.Append((sumChroma[c, t] / cnt).ToString("F2")); if (t + 1 < _templatePrepared.Length) lb.Append(", "); }
                 lb.AppendLine("]");
             }
             File.WriteAllText(Path.Combine(Path.GetTempPath(), "pg-loot-master-labeler.log"), lb.ToString());
@@ -530,6 +547,14 @@ public sealed class ItemMatcher
         return Math.Max(0, 1.0 - (ratio - 1.0));
     }
 
+    // 2D (a*, b*) chrominance-histogram correlation. Captures full color distribution.
+    // For multi-color icons this discriminates better than mean color: same mean ≠ same
+    // composition.
+    private static double ChromaHistScore(PreparedCrop cell, PreparedCrop template)
+    {
+        return Math.Max(0, Cv2.CompareHist(cell.ChromaHist, template.ChromaHist, HistCompMethods.Correl));
+    }
+
     // Hu moments shape similarity. Invariant to translation/scale/rotation.
     // Lower L2 distance between log-Hu vectors → more similar shape.
     private static double HuMomentScore(PreparedCrop cell, PreparedCrop template)
@@ -598,7 +623,7 @@ public sealed class ItemMatcher
         OpenCvMat gray = new(MatchSize, MatchSize, MatType.CV_8UC1, Scalar.All(0));
         OpenCvMat mask = new(MatchSize, MatchSize, MatType.CV_8UC1, Scalar.All(0));
         OpenCvMat hist = new(HueBins, 1, MatType.CV_32FC1, Scalar.All(0));
-        return new PreparedCrop(bgr, gray, mask, hist, new Scalar(0, 0, 0), 1.0, new Vec3b[9], 0, new double[7]);
+        return new PreparedCrop(bgr, gray, mask, hist, new Scalar(0, 0, 0), 1.0, new Vec3b[9], 0, new double[7], new OpenCvMat(16 * 16, 1, MatType.CV_32FC1, Scalar.All(0)));
     }
 
     private static PreparedCrop TightCropAndPrepare(OpenCvMat crop)
@@ -751,7 +776,29 @@ public sealed class ItemMatcher
         }
         catch { /* leave as zeros */ }
 
-        return new PreparedCrop(resizedBgr, resizedGray, resizedMask, hueHist, meanLab, aspect, fingerprintEarly, maxSat, huMoments);
+        // 2D (a*, b*) chrominance histogram on foreground pixels. 16x16 bins captures
+        // color distribution that mean-LAB cannot — e.g. multi-color icons that average
+        // to similar mean but have very different color makeup.
+        OpenCvMat chromaHist = new(16 * 16, 1, MatType.CV_32FC1, Scalar.All(0));
+        try
+        {
+            using OpenCvMat lab2 = new();
+            Cv2.CvtColor(tightImage, lab2, ColorConversionCodes.BGR2Lab);
+            using OpenCvMat hist2D = new();
+            OpenCvMat[] labArr = new[] { lab2 };
+            Cv2.CalcHist(labArr, new[] { 1, 2 }, tightMask, hist2D,
+                2, new[] { 16, 16 }, new[] { new Rangef(0, 256), new Rangef(0, 256) });
+            Cv2.Normalize(hist2D, hist2D, 1, 0, NormTypes.L1);
+            // Flatten 16×16 → 256×1 column for easy comparison.
+            chromaHist.Dispose();
+            chromaHist = hist2D.Reshape(0, 16 * 16).Clone();
+        }
+        catch
+        {
+            // Leave as zeros.
+        }
+
+        return new PreparedCrop(resizedBgr, resizedGray, resizedMask, hueHist, meanLab, aspect, fingerprintEarly, maxSat, huMoments, chromaHist);
     }
 
     private static OpenCvRect ClampRect(OpenCvRect r, int width, int height)

@@ -125,7 +125,7 @@ public partial class OverlayWindow : Window
     {
         DateTime now = DateTime.UtcNow;
         if (now < _nextPanelDetectionUtc) return;
-        _nextPanelDetectionUtc = now.AddMilliseconds(250);
+        _nextPanelDetectionUtc = now.AddMilliseconds(150);
 
         PanelLocation? loc;
         IReadOnlyList<OpenCvSharp.Rect> cells = Array.Empty<OpenCvSharp.Rect>();
@@ -171,7 +171,11 @@ public partial class OverlayWindow : Window
                             // Hue-based post-split: catch the case where the clusterer merged
                             // visually-distinct items whose BGR signatures happen to be close.
                             _latestClusterIds = _itemMatcher.SplitMixedClusters(bgrFrame, cells, _latestClusterIds);
-                            _latestClusterToTemplate = _itemMatcher.LabelClusters(bgrFrame, cells, _latestClusterIds);
+                            // LabelClusters (cluster→item-name matching) intentionally skipped:
+                            // accuracy was unreliable and the UI no longer shows it. Code kept
+                            // in ItemMatcher for future re-enable.
+                            //   _latestClusterToTemplate = _itemMatcher.LabelClusters(...);
+                            _latestClusterToTemplate = Array.Empty<int>();
                         }
                         else
                         {
@@ -478,7 +482,6 @@ public partial class OverlayWindow : Window
             System.Text.StringBuilder sb = new();
             if (_latestSidebarItems.Count > 0)
             {
-                string? targetName = OverlaySettings.Instance.TargetItemName;
                 int? threshold = _sidebarReader.CaptureThreshold;
                 sb.AppendLine("---- ITEMS ----");
                 for (int i = 0; i < _latestSidebarItems.Count; i++)
@@ -491,25 +494,10 @@ public partial class OverlayWindow : Window
                         : threshold is int thr
                             ? $"{item.CaptureCount ?? 0}/{thr}"
                             : (item.CaptureCount?.ToString() ?? "—");
-                    string marker = !string.IsNullOrEmpty(targetName) && item.Name == targetName
-                        ? " ← TARGET"
-                        : "";
-                    sb.AppendLine($"  {i:D2}: {name} [{status}]{marker}");
+                    sb.AppendLine($"  {i:D2}: {name} [{status}]");
                 }
             }
-            if (_latestClusterToTemplate.Length > 0 && _latestSidebarItems.Count > 0)
-            {
-                sb.AppendLine("---- CLUSTER -> ITEM ----");
-                for (int c = 0; c < _latestClusterToTemplate.Length; c++)
-                {
-                    int t = _latestClusterToTemplate[c];
-                    string name = (t >= 0 && t < _latestSidebarItems.Count)
-                        ? _latestSidebarItems[t].Name
-                        : "(unknown)";
-                    if (string.IsNullOrEmpty(name)) name = $"item {t}";
-                    sb.AppendLine($"  {c:D2} -> {name}");
-                }
-            }
+            // Cluster→Item section intentionally hidden — matcher labels unreliable.
             sb.AppendLine("---- BOARD (cluster IDs) ----");
             for (int r = 0; r < SolverBoard.Dim; r++)
             {

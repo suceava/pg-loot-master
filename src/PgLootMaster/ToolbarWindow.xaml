@@ -23,16 +23,19 @@
                        FontSize="12"
                        VerticalAlignment="Center"
                        Margin="4,0,12,0" />
+            <!-- Target selector hidden (matcher unreliable; kept for future re-enable). -->
             <TextBlock Text="Target:"
                        Foreground="#FFCCCCCC"
                        FontFamily="Consolas"
                        FontSize="11"
                        VerticalAlignment="Center"
-                       Margin="0,0,4,0" />
+                       Margin="0,0,4,0"
+                       Visibility="Collapsed" />
             <ComboBox x:Name="TargetComboBox"
                       Width="180" Height="24"
                       FontSize="11"
                       Margin="0,0,12,0"
+                      Visibility="Collapsed"
                       SelectionChanged="OnTargetChanged" />
             <Button x:Name="SettingsButton"
                     Content="Settings"

@@ -106,14 +106,25 @@ public static class Solver
                     matchedCellsByType.TryGetValue(m.Tile.TypeId, out int prev);
                     matchedCellsByType[m.Tile.TypeId] = prev + m.Length;
                 }
-
-                if (stepIdx == 0)
-                {
-                    if (m.Length >= 5) firstStepHasFive = true;
-                    else if (m.Length >= 4) firstStepHasFour = true;
-                }
             }
             score += CountLTOverlapCells(step) * LTShapeBonus * stepWeight;
+        }
+
+        // Step-0 turn-bonus detection. PG awards 4/5-match turn bonuses based on the
+        // largest CONNECTED group of matched tiles in the player's swap — so:
+        //   - A straight 5-match (5 cells in a line) → 5-match bonus.
+        //   - A T or L junction (two 3-matches sharing a cell, 5 unique cells in one
+        //     connected shape) → 5-match bonus.
+        //   - Two PARALLEL disjoint 3-matches (no shared cell) → just two 3-matches,
+        //     no turn bonus, even though 6 cells total were cleared.
+        // We compute connected components of step-0 matches (joined when any two share
+        // a cell) and take the largest component's unique-cell count.
+        if (result.Steps.Count > 0)
+        {
+            IReadOnlyList<Match> step0 = result.Steps[0];
+            int largestComponent = ConnectedComponentMaxCells(step0);
+            if (largestComponent >= 5) firstStepHasFive = true;
+            else if (largestComponent >= 4) firstStepHasFour = true;
         }
         // Turn-budget scaling: 1.0 at 5+ turns, ramping up to 3.0 at 1 turn left. Reflects
         // that extra turns are disproportionately valuable when game-over is imminent.
@@ -178,6 +189,53 @@ public static class Solver
             if (m.Cells[i].Col != col) return false;
         }
         return true;
+    }
+
+    // Returns the max unique-cell count across connected components of the matches in
+    // a step. Two matches are in the same component if they share at least one cell, and
+    // connectivity is transitive (A↔B↔C all in one component if pairwise overlaps exist).
+    // Used to detect T/L/cross shapes where 5+ unique cells are cleared in one connected
+    // swap — distinguishing them from two parallel disjoint 3-matches.
+    private static int ConnectedComponentMaxCells(IReadOnlyList<Match> matches)
+    {
+        if (matches.Count == 0) return 0;
+        if (matches.Count == 1) return matches[0].Length;
+
+        // Union-find over match indices, joined when any two match cell-sets overlap.
+        int n = matches.Count;
+        int[] parent = new int[n];
+        for (int i = 0; i < n; i++) parent[i] = i;
+        int Find(int x) { while (parent[x] != x) { parent[x] = parent[parent[x]]; x = parent[x]; } return x; }
+        void Union(int a, int b) { int ra = Find(a); int rb = Find(b); if (ra != rb) parent[ra] = rb; }
+
+        HashSet<Cell>[] cells = new HashSet<Cell>[n];
+        for (int i = 0; i < n; i++) cells[i] = new HashSet<Cell>(matches[i].Cells);
+        for (int i = 0; i < n; i++)
+        {
+            for (int j = i + 1; j < n; j++)
+            {
+                if (cells[i].Overlaps(cells[j])) Union(i, j);
+            }
+        }
+
+        // For each root, accumulate the union of cells in its component.
+        Dictionary<int, HashSet<Cell>> componentCells = new();
+        for (int i = 0; i < n; i++)
+        {
+            int root = Find(i);
+            if (!componentCells.TryGetValue(root, out HashSet<Cell>? set))
+            {
+                set = new HashSet<Cell>();
+                componentCells[root] = set;
+            }
+            foreach (Cell c in cells[i]) set.Add(c);
+        }
+        int max = 0;
+        foreach (HashSet<Cell> set in componentCells.Values)
+        {
+            if (set.Count > max) max = set.Count;
+        }
+        return max;
     }
 
     private static int CountLTOverlapCells(IReadOnlyList<Match> matchesInStep)
