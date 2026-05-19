@@ -200,7 +200,18 @@ public partial class OverlayWindow : Window
                             _itemMatcher.SetTemplates(_latestSidebarItems);
                             // Hue-based post-split: catch the case where the clusterer merged
                             // visually-distinct items whose BGR signatures happen to be close.
-                            _latestClusterIds = _itemMatcher.SplitMixedClusters(bgrFrame, cells, _latestClusterIds);
+                            int[] postSplit = _itemMatcher.SplitMixedClusters(bgrFrame, cells, _latestClusterIds);
+                            int postSplitCount = postSplit.Length == 0 ? 0 : postSplit.Max() + 1;
+                            // Safety cap: the board can have AT MOST one cluster per sidebar item.
+                            // The splitter can false-split items with internal color variation
+                            // (e.g. Fine Cotton Yarn / Health Potion both have red centers but
+                            // distinct outer textures). If the splitter exceeds that cap, revert
+                            // to pre-split — slightly merged is better than wrongly fragmented
+                            // (fragmentation makes the solver find no valid swap).
+                            if (postSplitCount <= _latestSidebarItems.Count)
+                            {
+                                _latestClusterIds = postSplit;
+                            }
                             // LabelClusters (cluster→item-name matching) intentionally skipped:
                             // accuracy was unreliable and the UI no longer shows it. Code kept
                             // in ItemMatcher for future re-enable.
