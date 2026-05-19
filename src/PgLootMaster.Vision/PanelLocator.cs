@@ -4,7 +4,7 @@ using OpenCvRect = OpenCvSharp.Rect;
 
 namespace PgLootMaster.Vision;
 
-public readonly record struct PanelLocation(OpenCvRect TitleBar, double Confidence);
+public readonly record struct PanelLocation(OpenCvRect TitleBar, double Confidence, string TemplateName);
 
 public sealed class PanelLocator : IDisposable
 {
@@ -110,7 +110,7 @@ public sealed class PanelLocator : IDisposable
             if (bestIdx < 0 || bestVal < _matchThreshold) return null;
             OpenCvMat winner = _templates[bestIdx];
             OpenCvRect titleBar = new(bestLoc.X, bestLoc.Y, winner.Width, winner.Height);
-            return new PanelLocation(titleBar, bestVal);
+            return new PanelLocation(titleBar, bestVal, _templateNames[bestIdx]);
         }
         finally
         {

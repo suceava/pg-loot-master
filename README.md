@@ -4,7 +4,7 @@ Windows desktop overlay that watches Project: Gorgon's **Loot Master Match-3** m
 
 ## Status
 
-Working end-to-end. Live overlay tracks PG's Loot Master panel, recognizes the 7×7 board, identifies item types from the sidebar (via OCR + visual matching), runs a 1-ply cascade-aware solver, and draws the recommended swap with a status box showing top candidates and per-cluster item names. Phases 0–4 + 3d landed. See [PLAN.md](./PLAN.md) for the original design and [SESSION_NOTES.md](./SESSION_NOTES.md) for the decisions behind it; deviations from PLAN are captured in commit history (each phase commit explains what was actually built).
+Working end-to-end. Live overlay tracks PG's Match-3 panels (Loot Master + Cashfall) via multi-template matching, recognizes the 7×7 board, OCR's the sidebar (item names, capture counts/✓, Score, Turns Made, Turns Left, and the post-game results modal), runs a 1-ply cascade-aware solver, and draws the recommended swap on the board. A toolbar shows the active solver strategy plus live per-strategy score comparisons vs prior runs at the current turn. Per-game history (turn-by-turn score, final score, duration, etc) persists across sessions; in-progress games are draft-saved and auto-resumed on restart. Solver supports three strategies — Safe (immediate-match conservative), AggressiveCascade (bet on chain reactions), and Speed (max score per turn, devalues turn preservation) — switchable in Settings. Phases 0–4 + 3d landed; subsequent features in commit history.
 
 ## Stack
 

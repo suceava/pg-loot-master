@@ -60,11 +60,17 @@ public partial class OverlayWindow : Window
     private readonly CellClusterer _cellClusterer = new();
     private readonly SidebarReader _sidebarReader = new();
     private readonly ItemMatcher _itemMatcher = new();
+    private readonly GameTracker _gameTracker = new();
+    private readonly GameHistoryStore _historyStore = GameHistoryStore.Load();
+    public GameHistoryStore HistoryStore => _historyStore;
     private IReadOnlyList<SidebarItem> _latestSidebarItems = Array.Empty<SidebarItem>();
     private int[] _latestClusterToTemplate = Array.Empty<int>();
     // Set by App.OnStartup so the overlay can push sidebar updates to the toolbar's target
     // dropdown without holding a direct reference to ToolbarWindow.
     public Action<IReadOnlyList<SidebarItem>>? OnSidebarItemsChanged { get; set; }
+    // Set by App.OnStartup so the overlay can push live-comparison snapshots to the toolbar
+    // without holding a direct reference to ToolbarWindow. Null = no active game / no history.
+    public Action<LiveComparisonSnapshot?>? OnLiveComparisonChanged { get; set; }
     private int _lastSidebarSignature;
     private static readonly System.Windows.Media.Color[] ClusterColors = new[]
     {
@@ -111,6 +117,25 @@ public partial class OverlayWindow : Window
         _captureCoordinator.FrameArrived += OnFrameForPanelDetection;
         OverlayLog.Write($"PanelLocator loaded templates: {string.Join(", ", _panelLocator.TemplateNames)} from {templateDir}");
 
+        // Restore any in-progress game from the previous session. Tracker picks up where it
+        // left off; next OnFrame just continues appending turns from the last known one.
+        GameRecord? recoveredDraft = _historyStore.LoadDraft();
+        if (recoveredDraft is not null && recoveredDraft.Turns.Count > 0)
+        {
+            _gameTracker.RestoreActive(recoveredDraft);
+            OverlayLog.Write($"Recovered in-progress game from draft: style={recoveredDraft.GameStyle} turns={recoveredDraft.Turns.Count} lastTurn={recoveredDraft.Turns[^1].Turn} score={recoveredDraft.Turns[^1].Score}");
+        }
+
+        // Mid-game snapshots to a SEPARATE draft file. Auto-restored on next startup if the
+        // app dies mid-game. Cleared on clean game-end. Main history.json only sees
+        // finalized games.
+        _gameTracker.Updated += () =>
+        {
+            GameRecord? active = _gameTracker.Active;
+            if (active is null || active.Turns.Count == 0) return;
+            _historyStore.SaveDraft(active);
+        };
+
 
         Closed += (_, _) =>
         {
@@ -149,17 +174,22 @@ public partial class OverlayWindow : Window
                 try
                 {
                     cells = _boardExtractor.TryDetectCells(bgrFrame, loc.Value.TitleBar);
+
+                    // Sidebar OCR runs on EVERY panel-found frame, decoupled from the
+                    // cells==49 board-stability gate. The header values (Score, TurnsMade,
+                    // TurnsLeft) need to update during cascade animations too, otherwise
+                    // early-game turns get skipped while the board isn't fully settled.
+                    _latestSidebarItems = _sidebarReader.ReadItems(bgrFrame, loc.Value.TitleBar);
+                    int sig = ComputeSidebarSignature(_latestSidebarItems);
+                    if (sig != _lastSidebarSignature)
+                    {
+                        _lastSidebarSignature = sig;
+                        IReadOnlyList<SidebarItem> snapshot = _latestSidebarItems;
+                        Dispatcher.BeginInvoke(() => OnSidebarItemsChanged?.Invoke(snapshot));
+                    }
+
                     if (cells.Count == BoardExtractor.GridDim * BoardExtractor.GridDim)
                     {
-                        _latestSidebarItems = _sidebarReader.ReadItems(bgrFrame, loc.Value.TitleBar);
-                        // Push to toolbar if the item set changed (names + captured flags).
-                        int sig = ComputeSidebarSignature(_latestSidebarItems);
-                        if (sig != _lastSidebarSignature)
-                        {
-                            _lastSidebarSignature = sig;
-                            IReadOnlyList<SidebarItem> snapshot = _latestSidebarItems;
-                            Dispatcher.BeginInvoke(() => OnSidebarItemsChanged?.Invoke(snapshot));
-                        }
                         // Borders are keyed by the cell clusterer (proven to give unique IDs per
                         // visually-distinct item). The ItemMatcher only labels each cluster with
                         // a sidebar item name for display — if its label is wrong, the borders
@@ -216,6 +246,20 @@ public partial class OverlayWindow : Window
                 _displayedCells = Array.Empty<OpenCvSharp.Rect>();
                 _displayedClusterIds = Array.Empty<int>();
                 _displayedRecommendation = null;
+                GameRecord? finished = _gameTracker.FinalizePanelLost();
+                if (finished is not null && finished.Turns.Count > 0)
+                {
+                    _historyStore.Append(finished);
+                    _historyStore.ClearDraft();
+                    OverlayLog.Write($"Game finalized: style={finished.GameStyle} score={finished.FinalScore} turns={finished.FinalTurns} duration={GameHistoryStore.DurationMinutes(finished):F1}min");
+                }
+                else
+                {
+                    OverlayLog.Write($"Game finalize SKIPPED: finished={finished is not null} turns={(finished?.Turns.Count ?? 0)}");
+                }
+                // Reset SidebarReader's monotonic floors so the next game's Score=0 / TurnsMade=0
+                // reads aren't rejected as "backward jumps" from the previous game's finals.
+                _sidebarReader.ResetForNewGame();
             }
         }
         else if (found)
@@ -239,6 +283,62 @@ public partial class OverlayWindow : Window
             _displayedClusterIds = _latestClusterIds;
             _displayedRecommendation = TrySolve(_latestClusterIds);
         }
+
+        // Game-history per-frame capture. OnFrame is a no-op when gameStyle is null or
+        // turnsMade hasn't been read yet; otherwise it opens a new GameRecord on first call
+        // and appends a GameTurn whenever turnsMade advances.
+        if (found)
+        {
+            _gameTracker.OnFrame(
+                MapTemplateToStyle(loc!.Value.TemplateName),
+                _sidebarReader.Score,
+                _sidebarReader.TurnsMade,
+                OverlaySettings.Instance.SolverStrategy);
+
+            // When the board is obscured (cascade animation OR a Game Over modal),
+            // try to OCR the central panel area for the authoritative "You scored X in Y
+            // turns!" message. If found, overwrite the tracker's last turn so FinalScore /
+            // FinalTurns match what the game itself displayed.
+            if (cells.Count != BoardExtractor.GridDim * BoardExtractor.GridDim
+                && _gameTracker.Active is not null)
+            {
+                OpenCvMat bgrFrame;
+                OpenCvMat? converted2 = null;
+                if (frame.Channels() == 4)
+                {
+                    converted2 = new OpenCvMat();
+                    OpenCvSharp.Cv2.CvtColor(frame, converted2, OpenCvSharp.ColorConversionCodes.BGRA2BGR);
+                    bgrFrame = converted2;
+                }
+                else
+                {
+                    bgrFrame = frame;
+                }
+                try
+                {
+                    (int Score, int Turns)? go = _sidebarReader.TryReadGameOver(bgrFrame, loc.Value.TitleBar);
+                    if (go.HasValue)
+                    {
+                        _gameTracker.OverrideFinalFromResults(go.Value.Turns, go.Value.Score);
+                        OverlayLog.Write($"GameOver OCR captured: score={go.Value.Score} turns={go.Value.Turns}");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    OverlayLog.Write($"GameOver OCR error: {ex.GetType().Name}: {ex.Message}");
+                }
+                finally
+                {
+                    converted2?.Dispose();
+                }
+            }
+        }
+
+        // Push live-comparison info to the toolbar via callback. Updated every accepted
+        // frame so the toolbar tracks score changes mid-cascade, independent of the
+        // debug status box visibility.
+        LiveComparisonSnapshot? liveSnap = BuildLiveSnapshot();
+        Dispatcher.BeginInvoke(() => OnLiveComparisonChanged?.Invoke(liveSnap));
 
         Dispatcher.Invoke(() =>
         {
@@ -320,13 +420,14 @@ public partial class OverlayWindow : Window
 
     private SolverContext? BuildSolverContext(int[] clusterIds)
     {
-        // Always pass TurnsLeft when known, even when there's no target — it affects the
-        // 4-match / 5-match turn bonuses for general scoring.
+        // Always pass TurnsLeft + Strategy when known, even when there's no target —
+        // they affect general scoring (turn-bonus scaling, cascade aggressiveness).
         int? turnsLeft = _sidebarReader.TurnsLeft;
+        SolverStrategy strategy = (SolverStrategy)OverlaySettings.Instance.SolverStrategy;
         string? targetName = OverlaySettings.Instance.TargetItemName;
         if (string.IsNullOrEmpty(targetName))
         {
-            return turnsLeft is null ? null : new SolverContext { TurnsLeft = turnsLeft };
+            return new SolverContext { TurnsLeft = turnsLeft, Strategy = strategy };
         }
         if (_latestSidebarItems.Count == 0 || _latestClusterToTemplate.Length == 0) return null;
         if (_sidebarReader.CaptureThreshold is not int threshold) return null;
@@ -373,7 +474,25 @@ public partial class OverlayWindow : Window
             CaptureThreshold = threshold,
             CurrentCounts = counts,
             TurnsLeft = turnsLeft,
+            Strategy = strategy,
         };
+    }
+
+    public static string MapTemplateToStyle(string templateName)
+    {
+        // "panel-title"          -> "Loot Master"
+        // "panel-title-cashfall"  -> "Cashfall"
+        // anything else          -> titlecase of suffix after "panel-title-", or the raw name
+        if (string.IsNullOrEmpty(templateName)) return "Unknown";
+        if (templateName == "panel-title") return "Loot Master";
+        const string prefix = "panel-title-";
+        if (templateName.StartsWith(prefix, StringComparison.OrdinalIgnoreCase))
+        {
+            string suffix = templateName.Substring(prefix.Length);
+            if (suffix.Length == 0) return "Loot Master";
+            return char.ToUpperInvariant(suffix[0]) + suffix.Substring(1).ToLowerInvariant();
+        }
+        return templateName;
     }
 
     private static int ComputeSidebarSignature(IReadOnlyList<SidebarItem> items)
@@ -445,6 +564,8 @@ public partial class OverlayWindow : Window
     private SwapRecommendation? _previouslyLoggedRecommendation;
     private int[]? _previouslyLoggedClusterIds;
     private string? _previouslyLoggedTargetName;
+    private int? _previouslyLoggedScore;
+    private int? _previouslyLoggedTurnsMade;
 
     private SwapRecommendation? TrySolve(int[] clusterIds)
     {
@@ -466,7 +587,9 @@ public partial class OverlayWindow : Window
             || _previouslyLoggedClusterIds.Length != clusterIds.Length
             || !clusterIds.SequenceEqual(_previouslyLoggedClusterIds);
         bool targetChanged = OverlaySettings.Instance.TargetItemName != _previouslyLoggedTargetName;
-        if (swapChanged || clusterIdsChanged || targetChanged)
+        bool scoreChanged = _sidebarReader.Score != _previouslyLoggedScore;
+        bool turnsMadeChanged = _sidebarReader.TurnsMade != _previouslyLoggedTurnsMade;
+        if (swapChanged || clusterIdsChanged || targetChanged || scoreChanged || turnsMadeChanged)
         {
             int showCount = Math.Min(5, top.Count);
             if (top.Count > 5)
@@ -520,7 +643,40 @@ public partial class OverlayWindow : Window
             _previouslyLoggedRecommendation = rec;
             _previouslyLoggedClusterIds = (int[])clusterIds.Clone();
             _previouslyLoggedTargetName = OverlaySettings.Instance.TargetItemName;
+            _previouslyLoggedScore = _sidebarReader.Score;
+            _previouslyLoggedTurnsMade = _sidebarReader.TurnsMade;
         }
         return rec;
     }
+
+    private LiveComparisonSnapshot? BuildLiveSnapshot()
+    {
+        GameRecord? active = _gameTracker.Active;
+        if (active is null) return null;
+        if (_sidebarReader.Score is not int score) return null;
+        if (_sidebarReader.TurnsMade is not int turn) return null;
+
+        PerStrategyStats[] per = new[]
+        {
+            PerStrategyFor(active.GameStyle, turn, 0, "Safe"),
+            PerStrategyFor(active.GameStyle, turn, 1, "Aggressive"),
+            PerStrategyFor(active.GameStyle, turn, 2, "Speed"),
+        };
+        return new LiveComparisonSnapshot(active.GameStyle, turn, score, active.Strategy, per);
+    }
+
+    private PerStrategyStats PerStrategyFor(string style, int turn, int strategy, string name)
+    {
+        (int? best, double? avg) = _historyStore.ScoreAtTurn(style, turn, strategy);
+        return new PerStrategyStats(strategy, name, best, avg);
+    }
 }
+
+public sealed record PerStrategyStats(int Strategy, string Name, int? Best, double? Avg);
+
+public sealed record LiveComparisonSnapshot(
+    string GameStyle,
+    int Turn,
+    int Score,
+    int CurrentStrategy,
+    PerStrategyStats[] PerStrategy);

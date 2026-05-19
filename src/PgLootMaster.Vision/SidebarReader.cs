@@ -54,6 +54,63 @@ public sealed class SidebarReader
     // Number from the "Turns Left:" header row. null until first successful read.
     public int? TurnsLeft { get; private set; }
 
+    // Number from the "Score:" header row. Monotonically non-decreasing within a game;
+    // a parse that jumps backward is dropped as OCR noise. null until first successful read.
+    public int? Score { get; private set; }
+
+    // Number from the "Turns Made:" header row. Monotonically non-decreasing within a game;
+    // a parse that jumps backward is dropped as OCR noise. null until first successful read.
+    public int? TurnsMade { get; private set; }
+
+    // Reset header values at the start of a new game (panel re-acquired). Called by the
+    // overlay so the new game doesn't inherit the prior game's monotonic floor.
+    public void ResetForNewGame()
+    {
+        Score = null;
+        TurnsMade = null;
+        TurnsLeft = null;
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex GameOverRe = new(
+        @"scored\s+(\d[\d,]*)\s+in\s+(\d+)\s+turn",
+        System.Text.RegularExpressions.RegexOptions.IgnoreCase
+        | System.Text.RegularExpressions.RegexOptions.Compiled);
+
+    /// <summary>
+    /// OCR the central panel area looking for the Game Over modal's
+    /// "You scored X in Y turns!" message. Returns (score, turns) when the text is found.
+    /// Authoritative — overrides any sidebar OCR readings for the final game state.
+    /// </summary>
+    public (int Score, int Turns)? TryReadGameOver(OpenCvMat bgrFrame, OpenCvRect titleBar)
+    {
+        if (!_ocr.IsAvailable || bgrFrame.Empty()) return null;
+
+        // The dialog is centered horizontally in the board area (left of the sidebar)
+        // and sits roughly in the upper-mid panel vertically. The crop is generous on
+        // purpose so the text is fully inside.
+        OpenCvRect rect = new(
+            titleBar.X + 150,
+            titleBar.Y + 200,
+            Math.Min(950, SidebarOffsetXFromTitle - 100),
+            550);
+        rect = ClampToFrame(rect, bgrFrame);
+        if (rect.Width < 200 || rect.Height < 100) return null;
+
+        using OpenCvMat dialogCrop = new(bgrFrame, rect);
+        IReadOnlyList<OcrLine> lines = _ocr.Recognize(dialogCrop);
+        foreach (OcrLine line in lines)
+        {
+            System.Text.RegularExpressions.Match m = GameOverRe.Match(line.Text);
+            if (m.Success
+                && int.TryParse(m.Groups[1].Value.Replace(",", ""), out int score)
+                && int.TryParse(m.Groups[2].Value, out int turns))
+            {
+                return (score, turns);
+            }
+        }
+        return null;
+    }
+
     public IReadOnlyList<SidebarItem> ReadItems(OpenCvMat bgrFrame, OpenCvRect titleBar)
     {
         OpenCvRect sidebarRect = new(
@@ -261,38 +318,23 @@ public sealed class SidebarReader
                     }
                 }
 
-                // Parse "Turns Left: N". OCR reads label as "Irns Left:" or similar; the
-                // digit value is on a separate line at similar Y but further right (x≈230).
-                // Find the label line by case-insensitive "left" match, then find a digit-only
-                // OCR line whose Y center is within ~12px of the label.
-                OcrLine? turnsLeftLabel = null;
-                foreach (OcrLine line in sorted)
-                {
-                    if (line.Text.IndexOf("left", StringComparison.OrdinalIgnoreCase) >= 0)
-                    {
-                        turnsLeftLabel = line;
-                        break;
-                    }
-                }
-                if (turnsLeftLabel is not null)
-                {
-                    int labelYCenter = turnsLeftLabel.Bbox.Y + turnsLeftLabel.Bbox.Height / 2;
-                    foreach (OcrLine line in sorted)
-                    {
-                        if (line == turnsLeftLabel) continue;
-                        int lineYCenter = line.Bbox.Y + line.Bbox.Height / 2;
-                        if (Math.Abs(lineYCenter - labelYCenter) > 12) continue;
-                        // Replace OCR's letter-O confusion with 0, then check for all-digits.
-                        string normalized = line.Text.Trim().Replace('O', '0').Replace('o', '0');
-                        if (normalized.Length > 0
-                            && normalized.All(char.IsDigit)
-                            && int.TryParse(normalized, out int turns))
-                        {
-                            TurnsLeft = turns;
-                            break;
-                        }
-                    }
-                }
+                // Parse the three header numeric values. OCR reads the label noisily (e.g.
+                // "Irns Left:" instead of "Turns Left:"), and the digit value sits on a
+                // separate line at a similar Y but further right. Find each label by a
+                // distinctive substring, then read the value beside it — first via the main
+                // OCR pass, falling back to a targeted re-OCR of just the value column
+                // (Windows OCR misses small isolated single-digit values in large images).
+                // OCR commonly drops the leading "S" of "Score:" — match on "core".
+                int? scoreVal = FindValueBesideLabel(sorted, "core", sidebarCropForOcr);
+                if (scoreVal is int s && (Score is null || s >= Score))
+                    Score = s;
+
+                int? turnsMadeVal = FindValueBesideLabel(sorted, "made", sidebarCropForOcr);
+                if (turnsMadeVal is int tm && (TurnsMade is null || tm >= TurnsMade))
+                    TurnsMade = tm;
+
+                int? turnsLeftVal = FindValueBesideLabel(sorted, "left", sidebarCropForOcr);
+                if (turnsLeftVal is int tl) TurnsLeft = tl;
 
                 foreach (OcrLine line in sorted)
                 {
@@ -396,6 +438,99 @@ public sealed class SidebarReader
         }
 
         return items;
+    }
+
+    private int? FindValueBesideLabel(
+        IReadOnlyList<OcrLine> sortedLines,
+        string labelSubstring,
+        OpenCvMat sidebarCrop)
+    {
+        OcrLine? labelLine = null;
+        foreach (OcrLine line in sortedLines)
+        {
+            if (line.Text.IndexOf(labelSubstring, StringComparison.OrdinalIgnoreCase) >= 0)
+            {
+                labelLine = line;
+                break;
+            }
+        }
+        if (labelLine is null) return null;
+
+        // Case 1: value lives on the same OCR line as the label (e.g. "Score: 250").
+        System.Text.RegularExpressions.Match inline = System.Text.RegularExpressions.Regex.Match(
+            labelLine.Text, @"(\d[\d,]*)\s*$");
+        if (inline.Success && int.TryParse(inline.Groups[1].Value.Replace(",", ""), out int inlineN))
+        {
+            return inlineN;
+        }
+
+        // Case 2: value sits on its own line at a similar Y center.
+        int labelYCenter = labelLine.Bbox.Y + labelLine.Bbox.Height / 2;
+        foreach (OcrLine line in sortedLines)
+        {
+            if (line == labelLine) continue;
+            int lineYCenter = line.Bbox.Y + line.Bbox.Height / 2;
+            if (Math.Abs(lineYCenter - labelYCenter) > 15) continue;
+            string normalized = NormalizeDigits(line.Text);
+            if (normalized.Length > 0
+                && normalized.All(char.IsDigit)
+                && int.TryParse(normalized, out int n))
+            {
+                return n;
+            }
+        }
+
+        // Case 3: Windows OCR drops small / single-digit values in busy images. Re-OCR
+        // just the value column (right of the label, similar Y), upscaled 2× to give the
+        // OCR engine larger, isolated digits to recognize.
+        return RetryOcrValueColumn(sidebarCrop, labelLine);
+    }
+
+    private int? RetryOcrValueColumn(OpenCvMat sidebarCrop, OcrLine labelLine)
+    {
+        int yCenter = labelLine.Bbox.Y + labelLine.Bbox.Height / 2;
+        int padY = labelLine.Bbox.Height;       // generous vertical padding
+        int yTop = Math.Max(0, yCenter - padY);
+        int yBot = Math.Min(sidebarCrop.Rows, yCenter + padY);
+        int xStart = Math.Min(sidebarCrop.Cols - 1, labelLine.Bbox.X + labelLine.Bbox.Width + 30);
+        int xEnd = sidebarCrop.Cols;
+        int width = xEnd - xStart;
+        int height = yBot - yTop;
+        if (width < 20 || height < 12) return null;
+
+        OpenCvRect cropRect = new(xStart, yTop, width, height);
+        using OpenCvMat valueCrop = new(sidebarCrop, cropRect);
+        using OpenCvMat scaled = new();
+        Cv2.Resize(
+            valueCrop,
+            scaled,
+            new Size(width * 3, height * 3),
+            0, 0,
+            InterpolationFlags.Cubic);
+
+        IReadOnlyList<OcrLine> retryLines = _ocr.Recognize(scaled);
+        foreach (OcrLine line in retryLines)
+        {
+            string normalized = NormalizeDigits(line.Text);
+            if (normalized.Length > 0
+                && normalized.All(char.IsDigit)
+                && int.TryParse(normalized, out int n))
+            {
+                return n;
+            }
+        }
+        return null;
+    }
+
+    private static string NormalizeDigits(string text)
+    {
+        return text.Trim()
+            .Replace(",", "")
+            .Replace("O", "0").Replace("o", "0")
+            .Replace("l", "1").Replace("I", "1")
+            .Replace("Z", "2")
+            .Replace("S", "5")
+            .Replace("B", "8");
     }
 
     private static void AddSegmentRows(List<int> rowCentersY, int scanYOrigin, int segStart, int segEnd, int minLen, int expectedStride)

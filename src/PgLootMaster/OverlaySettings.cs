@@ -54,6 +54,16 @@ public sealed class OverlaySettings : INotifyPropertyChanged
         set => Set(ref _targetItemName, value);
     }
 
+    // Solver strategy preset. 0 = Safe (default), 1 = AggressiveCascade.
+    // Stored as int so OverlaySettings.cs doesn't have to take a dependency on
+    // PgLootMaster.Solver (which would create a layering issue).
+    private int _solverStrategy;
+    public int SolverStrategy
+    {
+        get => _solverStrategy;
+        set => Set(ref _solverStrategy, value);
+    }
+
     public event PropertyChangedEventHandler? PropertyChanged;
 
     private void Set<T>(ref T field, T value, [CallerMemberName] string? propertyName = null)
@@ -79,6 +89,8 @@ public sealed class OverlaySettings : INotifyPropertyChanged
                     settings.ShowDebugTextWindow = loaded.ShowDebugTextWindow;
                     settings.ToolbarLeft = loaded.ToolbarLeft;
                     settings.ToolbarTop = loaded.ToolbarTop;
+                    settings.TargetItemName = loaded.TargetItemName;
+                    settings.SolverStrategy = loaded.SolverStrategy;
                 }
             }
         }

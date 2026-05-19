@@ -8,6 +8,33 @@ public sealed record SwapRecommendation(
     CascadeResult Cascade);
 
 /// <summary>
+/// Strategy presets that flip several scoring constants together. Lets the user pick how
+/// aggressively the solver bets on cascade chains.
+/// </summary>
+public enum SolverStrategy
+{
+    /// <summary>
+    /// Conservative: prefer immediate match score, discount cascade steps heavily, turn
+    /// bonus only for step-0 4+/5-match. The safer pick when clustering isn't reliable
+    /// (mis-merged clusters can produce fake cascade matches in the simulator).
+    /// </summary>
+    Safe = 0,
+    /// <summary>
+    /// Aggressive: count cascade matches at near-full weight, award the 4+/5-match turn
+    /// bonus for any cascade step (not just step 0), and reward bottom-row matches much
+    /// more (they create the deepest gravity disruption → more downstream cascades).
+    /// </summary>
+    AggressiveCascade = 1,
+    /// <summary>
+    /// Speed: maximize score-per-turn, ignore turn preservation. Cuts the 4/5-match turn
+    /// bonus to a quarter (the free turn is worth less as the game drags on — more item
+    /// types appear, point density per turn drops). Keeps cascade weighting high but
+    /// devalues lookahead. Best when going for fast high-score finishes vs long grinds.
+    /// </summary>
+    Speed = 2,
+}
+
+/// <summary>
 /// Optional context for the solver to optimize for capturing a specific item (rather than
 /// raw score). Pass null/default for general optimization.
 /// </summary>
@@ -28,18 +55,62 @@ public sealed class SolverContext
     /// each extra turn disproportionately valuable).
     /// </summary>
     public int? TurnsLeft { get; init; }
+    /// <summary>Solver strategy preset. Defaults to Safe.</summary>
+    public SolverStrategy Strategy { get; init; } = SolverStrategy.Safe;
 }
 
 public static class Solver
 {
     private const double VerticalBonus = 1.2;
-    private const double BottomBonusPerRow = 0.5;
     private const double LTShapeBonus = 12.0;
-    private const double LookaheadDiscount = 0.3;
     private const double FourMatchTurnBonus = 200.0;
     private const double FiveMatchTurnBonus = 500.0;
     private const double TargetMultiplier = 5.0;
     private const double CaptureStealPenalty = 1000.0;
+
+    // Strategy-dependent constants. Picked per-call from SolverContext.Strategy.
+    //
+    // Safe: cascade step weights drop fast (step 0 full, step 1+ heavily discounted), turn
+    //   bonus only on step 0, low bottom-row bonus, conservative lookahead discount.
+    // AggressiveCascade: cascade step weights stay near 1.0, turn bonus on any step, strong
+    //   bottom-row bonus (low matches create deeper gravity disruption → more cascades),
+    //   lookahead weighted higher.
+    // Speed: same cascade weighting as Aggressive but turn-bonus values quartered and
+    //   lookahead discount cut. Reflects the empirical insight that the value of a free
+    //   turn DECLINES through a PG match — each captured item adds an item type, which
+    //   dilutes the board and drops points-per-turn. So scoring big now matters more
+    //   than preserving turns.
+    private static (double cascadeStepBase, double cascadeStepDecay,
+                    bool turnBonusAllSteps, double bottomBonusPerRow,
+                    double lookaheadDiscount,
+                    double fourMatchTurnBonus, double fiveMatchTurnBonus)
+        StrategyParams(SolverStrategy s) => s switch
+        {
+            SolverStrategy.AggressiveCascade => (
+                cascadeStepBase: 0.7,
+                cascadeStepDecay: 0.85,
+                turnBonusAllSteps: true,
+                bottomBonusPerRow: 1.5,
+                lookaheadDiscount: 0.5,
+                fourMatchTurnBonus: FourMatchTurnBonus,
+                fiveMatchTurnBonus: FiveMatchTurnBonus),
+            SolverStrategy.Speed => (
+                cascadeStepBase: 0.7,
+                cascadeStepDecay: 0.85,
+                turnBonusAllSteps: true,
+                bottomBonusPerRow: 1.5,
+                lookaheadDiscount: 0.2,
+                fourMatchTurnBonus: FourMatchTurnBonus * 0.25,
+                fiveMatchTurnBonus: FiveMatchTurnBonus * 0.25),
+            _ /* Safe */ => (
+                cascadeStepBase: 0.3,
+                cascadeStepDecay: 0.7,
+                turnBonusAllSteps: false,
+                bottomBonusPerRow: 0.5,
+                lookaheadDiscount: 0.3,
+                fourMatchTurnBonus: FourMatchTurnBonus,
+                fiveMatchTurnBonus: FiveMatchTurnBonus),
+        };
 
     public static SwapRecommendation? FindBestSwap(Board board, out List<SwapRecommendation> topCandidates, SolverContext? context = null)
     {
@@ -63,7 +134,7 @@ public static class Solver
                 }
             }
 
-            double totalScore = immediateScore + LookaheadDiscount * lookaheadScore;
+            double totalScore = immediateScore + StrategyParams(context?.Strategy ?? SolverStrategy.Safe).lookaheadDiscount * lookaheadScore;
             all.Add(new SwapRecommendation(swap, totalScore, immediateScore, lookaheadScore, result));
         }
         all.Sort((a, b) => b.Score.CompareTo(a.Score));
@@ -76,8 +147,12 @@ public static class Solver
     public static double ScoreCascade(CascadeResult result, SolverContext? context = null)
     {
         double score = 0;
-        bool firstStepHasFour = false;
-        bool firstStepHasFive = false;
+        bool anyStepHasFour = false;
+        bool anyStepHasFive = false;
+        (double cascadeStepBase, double cascadeStepDecay, bool turnBonusAllSteps,
+         double bottomBonusPerRow, _,
+         double fourMatchBonus, double fiveMatchBonus) =
+            StrategyParams(context?.Strategy ?? SolverStrategy.Safe);
 
         // Track per-typeId match-cell counts across the whole cascade — used to detect
         // a non-target item capturing this turn (which would reset the target's count).
@@ -90,10 +165,10 @@ public static class Solver
         for (int stepIdx = 0; stepIdx < result.Steps.Count; stepIdx++)
         {
             IReadOnlyList<Match> step = result.Steps[stepIdx];
-            double stepWeight = stepIdx == 0 ? 1.0 : 0.3 * Math.Pow(0.7, stepIdx - 1);
+            double stepWeight = stepIdx == 0 ? 1.0 : cascadeStepBase * Math.Pow(cascadeStepDecay, stepIdx - 1);
             foreach (Match m in step)
             {
-                double matchScore = ScoreSingleMatch(m);
+                double matchScore = ScoreSingleMatch(m, bottomBonusPerRow);
                 // Apply target multiplier when the match is of the target item.
                 if (context?.TargetTypeId is int targetTypeId && m.Tile.TypeId == targetTypeId)
                 {
@@ -110,21 +185,19 @@ public static class Solver
             score += CountLTOverlapCells(step) * LTShapeBonus * stepWeight;
         }
 
-        // Step-0 turn-bonus detection. PG awards 4/5-match turn bonuses based on the
-        // largest CONNECTED group of matched tiles in the player's swap — so:
-        //   - A straight 5-match (5 cells in a line) → 5-match bonus.
-        //   - A T or L junction (two 3-matches sharing a cell, 5 unique cells in one
-        //     connected shape) → 5-match bonus.
-        //   - Two PARALLEL disjoint 3-matches (no shared cell) → just two 3-matches,
-        //     no turn bonus, even though 6 cells total were cleared.
-        // We compute connected components of step-0 matches (joined when any two share
-        // a cell) and take the largest component's unique-cell count.
-        if (result.Steps.Count > 0)
+        // Turn-bonus detection: PG awards 4/5-match turn bonuses based on the largest
+        // CONNECTED group of matched tiles (handles T/L junctions = two 3-matches sharing
+        // a cell → 5 unique cells = 5-match bonus). Disjoint parallel matches do NOT count.
+        //
+        // In Safe strategy: only step 0 (the player's direct swap) gets a turn bonus.
+        // In AggressiveCascade: any cascade step with a 4+/5+ connected group qualifies —
+        // each cascade chain match that hits the threshold awards the bonus.
+        int stepsToCheck = turnBonusAllSteps ? result.Steps.Count : Math.Min(1, result.Steps.Count);
+        for (int s = 0; s < stepsToCheck; s++)
         {
-            IReadOnlyList<Match> step0 = result.Steps[0];
-            int largestComponent = ConnectedComponentMaxCells(step0);
-            if (largestComponent >= 5) firstStepHasFive = true;
-            else if (largestComponent >= 4) firstStepHasFour = true;
+            int largestComponent = ConnectedComponentMaxCells(result.Steps[s]);
+            if (largestComponent >= 5) anyStepHasFive = true;
+            else if (largestComponent >= 4) anyStepHasFour = true;
         }
         // Turn-budget scaling: 1.0 at 5+ turns, ramping up to 3.0 at 1 turn left. Reflects
         // that extra turns are disproportionately valuable when game-over is imminent.
@@ -133,8 +206,8 @@ public static class Solver
         {
             turnUrgencyMultiplier = 1.0 + Math.Max(0, 5 - turnsLeft) * 0.5;
         }
-        if (firstStepHasFive) score += FiveMatchTurnBonus * turnUrgencyMultiplier;
-        else if (firstStepHasFour) score += FourMatchTurnBonus * turnUrgencyMultiplier;
+        if (anyStepHasFive) score += fiveMatchBonus * turnUrgencyMultiplier;
+        else if (anyStepHasFour) score += fourMatchBonus * turnUrgencyMultiplier;
 
         // Capture-steal penalty: if any NON-target item's count would cross the threshold
         // this turn (current count + this swap's matches >= threshold), it would capture
@@ -158,7 +231,7 @@ public static class Solver
         return score;
     }
 
-    private static double ScoreSingleMatch(Match m)
+    private static double ScoreSingleMatch(Match m, double bottomBonusPerRow)
     {
         double baseScore = m.Length switch
         {
@@ -171,7 +244,7 @@ public static class Solver
         double bottomBonus = 0;
         foreach (Cell cell in m.Cells)
         {
-            bottomBonus += cell.Row * BottomBonusPerRow;
+            bottomBonus += cell.Row * bottomBonusPerRow;
         }
 
         bool isVertical = IsVerticalMatch(m);

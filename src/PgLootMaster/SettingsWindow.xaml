@@ -32,6 +32,35 @@
                   Margin="0,4"
                   Checked="OnShowDebugTextWindowChanged"
                   Unchecked="OnShowDebugTextWindowChanged" />
+
+        <TextBlock Text="SOLVER"
+                   FontSize="11"
+                   FontWeight="Bold"
+                   Foreground="#FF20FF20"
+                   Margin="0,16,0,8" />
+        <Border BorderBrush="#FF20FF20"
+                BorderThickness="0,0,0,1"
+                Margin="0,0,0,12" />
+        <TextBlock Text="Strategy:"
+                   Foreground="White"
+                   Margin="0,0,0,4" />
+        <ComboBox x:Name="StrategyComboBox"
+                  Width="320"
+                  Height="26"
+                  FontSize="12"
+                  HorizontalAlignment="Left"
+                  SelectionChanged="OnStrategyChanged">
+            <ComboBoxItem Content="Safe — favor immediate match, conservative" />
+            <ComboBoxItem Content="Aggressive Cascade — bet on chain reactions" />
+            <ComboBoxItem Content="Speed — max score per turn, win fast" />
+        </ComboBox>
+        <TextBlock x:Name="StrategyDescription"
+                   Foreground="#FFAAAAAA"
+                   FontSize="10"
+                   TextWrapping="Wrap"
+                   Width="320"
+                   Margin="0,6,0,0" />
+
         <Button Content="Close"
                 Width="80"
                 Height="26"

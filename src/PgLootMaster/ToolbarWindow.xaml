@@ -15,41 +15,107 @@
             BorderBrush="#FF20FF20"
             BorderThickness="1"
             CornerRadius="4"
-            Padding="6,4">
-        <StackPanel Orientation="Horizontal">
-            <TextBlock Text="PG Loot Master"
-                       Foreground="White"
-                       FontFamily="Consolas"
-                       FontSize="12"
-                       VerticalAlignment="Center"
-                       Margin="4,0,12,0" />
-            <!-- Target selector hidden (matcher unreliable; kept for future re-enable). -->
-            <TextBlock Text="Target:"
-                       Foreground="#FFCCCCCC"
-                       FontFamily="Consolas"
-                       FontSize="11"
-                       VerticalAlignment="Center"
-                       Margin="0,0,4,0"
-                       Visibility="Collapsed" />
-            <ComboBox x:Name="TargetComboBox"
-                      Width="180" Height="24"
-                      FontSize="11"
-                      Margin="0,0,12,0"
-                      Visibility="Collapsed"
-                      SelectionChanged="OnTargetChanged" />
-            <Button x:Name="SettingsButton"
-                    Content="Settings"
-                    Width="60" Height="24"
-                    FontSize="11"
-                    Margin="0,0,4,0"
-                    Click="OnSettingsClick" />
-            <Button x:Name="CloseButton"
-                    Content="Close"
-                    Width="50" Height="24"
-                    FontSize="11"
-                    Background="#FF802020"
-                    Foreground="White"
-                    Click="OnCloseClick" />
+            Padding="8,6">
+        <StackPanel Orientation="Vertical">
+            <!-- Row 1: title + controls -->
+            <StackPanel Orientation="Horizontal">
+                <TextBlock Text="PG Loot Master"
+                           Foreground="White"
+                           FontFamily="Consolas"
+                           FontSize="12"
+                           FontWeight="Bold"
+                           VerticalAlignment="Center"
+                           Margin="2,0,12,0" />
+                <!-- Target selector hidden (matcher unreliable; kept for future re-enable). -->
+                <TextBlock Text="Target:"
+                           Foreground="#FFCCCCCC"
+                           FontFamily="Consolas"
+                           FontSize="11"
+                           VerticalAlignment="Center"
+                           Margin="0,0,4,0"
+                           Visibility="Collapsed" />
+                <ComboBox x:Name="TargetComboBox"
+                          Width="180" Height="24"
+                          FontSize="11"
+                          Margin="0,0,12,0"
+                          Visibility="Collapsed"
+                          SelectionChanged="OnTargetChanged" />
+                <Button x:Name="SettingsButton"
+                        Content="Settings"
+                        Width="64" Height="24"
+                        FontSize="11"
+                        Margin="0,0,4,0"
+                        Click="OnSettingsClick" />
+                <Button x:Name="HistoryButton"
+                        Content="History"
+                        Width="64" Height="24"
+                        FontSize="11"
+                        Margin="0,0,4,0"
+                        Click="OnHistoryClick" />
+                <Button x:Name="CloseButton"
+                        Content="Close"
+                        Width="56" Height="24"
+                        FontSize="11"
+                        Background="#FF802020"
+                        Foreground="White"
+                        Click="OnCloseClick" />
+            </StackPanel>
+
+            <!-- Row 2: strategy + current state + per-strategy comparisons -->
+            <Border BorderBrush="#FF333333"
+                    BorderThickness="0,1,0,0"
+                    Margin="0,8,0,0"
+                    Padding="0,8,0,2">
+                <StackPanel Orientation="Vertical">
+                    <!-- Current state line: STRATEGY chip + turn + score -->
+                    <StackPanel Orientation="Horizontal">
+                        <TextBlock Text="STRATEGY"
+                                   Foreground="#FFAAAAAA"
+                                   FontFamily="Consolas"
+                                   FontSize="11"
+                                   VerticalAlignment="Center"
+                                   Margin="2,0,8,0" />
+                        <Border Background="#FF20FF20"
+                                CornerRadius="3"
+                                Padding="8,3"
+                                Margin="0,0,20,0"
+                                VerticalAlignment="Center">
+                            <TextBlock x:Name="StrategyChip"
+                                       Foreground="#FF1E1E1E"
+                                       FontFamily="Consolas"
+                                       FontSize="12"
+                                       FontWeight="Bold" />
+                        </Border>
+                        <TextBlock x:Name="LiveStateText"
+                                   FontFamily="Consolas"
+                                   FontSize="14"
+                                   VerticalAlignment="Center"
+                                   Visibility="Collapsed" />
+                        <TextBlock x:Name="LivePlaceholderText"
+                                   Text="no active game"
+                                   Foreground="#FF888888"
+                                   FontFamily="Consolas"
+                                   FontSize="12"
+                                   VerticalAlignment="Center" />
+                    </StackPanel>
+                    <!-- Per-strategy comparison rows (visibility toggled per row when data exists) -->
+                    <TextBlock x:Name="CompareSafeText"
+                               FontFamily="Consolas"
+                               FontSize="12"
+                               Margin="2,4,0,0"
+                               Visibility="Collapsed" />
+                    <TextBlock x:Name="CompareAggressiveText"
+                               FontFamily="Consolas"
+                               FontSize="12"
+                               Margin="2,2,0,0"
+                               Visibility="Collapsed" />
+                    <TextBlock x:Name="CompareSpeedText"
+                               FontFamily="Consolas"
+                               FontSize="12"
+                               Margin="2,2,0,0"
+                               Visibility="Collapsed" />
+                </StackPanel>
+            </Border>
         </StackPanel>
     </Border>
 </Window>
