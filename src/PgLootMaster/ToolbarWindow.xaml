@@ -26,8 +26,10 @@
                            FontWeight="Bold"
                            VerticalAlignment="Center"
                            Margin="2,0,12,0" />
-                <!-- Target selector hidden (matcher unreliable; kept for future re-enable). -->
-                <TextBlock Text="Target:"
+                <!-- Target selector only shown when active strategy = Target Hunter
+                     (visibility flipped in RefreshStrategyChip). -->
+                <TextBlock x:Name="TargetLabel"
+                           Text="Target:"
                            Foreground="#FFCCCCCC"
                            FontFamily="Consolas"
                            FontSize="11"
@@ -104,12 +106,17 @@
                                FontSize="12"
                                Margin="2,4,0,0"
                                Visibility="Collapsed" />
-                    <TextBlock x:Name="CompareAggressiveText"
+                    <TextBlock x:Name="CompareCascadeHunterText"
                                FontFamily="Consolas"
                                FontSize="12"
                                Margin="2,2,0,0"
                                Visibility="Collapsed" />
                     <TextBlock x:Name="CompareSpeedText"
+                               FontFamily="Consolas"
+                               FontSize="12"
+                               Margin="2,2,0,0"
+                               Visibility="Collapsed" />
+                    <TextBlock x:Name="CompareTargetHunterText"
                                FontFamily="Consolas"
                                FontSize="12"
                                Margin="2,2,0,0"

@@ -212,11 +212,17 @@ public partial class OverlayWindow : Window
                             {
                                 _latestClusterIds = postSplit;
                             }
-                            // LabelClusters (cluster→item-name matching) intentionally skipped:
-                            // accuracy was unreliable and the UI no longer shows it. Code kept
-                            // in ItemMatcher for future re-enable.
-                            //   _latestClusterToTemplate = _itemMatcher.LabelClusters(...);
-                            _latestClusterToTemplate = Array.Empty<int>();
+                            // LabelClusters (cluster→item-name matching) is unreliable, so we
+                            // ONLY run it when the user has opted in via the Target Hunter
+                            // strategy. Other strategies don't need cluster→template mapping.
+                            if (OverlaySettings.Instance.SolverStrategy == (int)SolverStrategy.TargetHunter)
+                            {
+                                _latestClusterToTemplate = _itemMatcher.LabelClusters(bgrFrame, cells, _latestClusterIds);
+                            }
+                            else
+                            {
+                                _latestClusterToTemplate = Array.Empty<int>();
+                            }
                         }
                         else
                         {
@@ -670,8 +676,9 @@ public partial class OverlayWindow : Window
         PerStrategyStats[] per = new[]
         {
             PerStrategyFor(active.GameStyle, turn, 0, "Safe"),
-            PerStrategyFor(active.GameStyle, turn, 1, "Aggressive"),
+            PerStrategyFor(active.GameStyle, turn, 1, "Cascade Hunter"),
             PerStrategyFor(active.GameStyle, turn, 2, "Speed"),
+            PerStrategyFor(active.GameStyle, turn, 3, "Target Hunter"),
         };
         return new LiveComparisonSnapshot(active.GameStyle, turn, score, active.Strategy, per);
     }

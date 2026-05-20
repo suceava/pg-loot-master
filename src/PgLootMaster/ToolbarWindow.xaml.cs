@@ -33,13 +33,20 @@ public partial class ToolbarWindow : Window
 
     private void RefreshStrategyChip()
     {
-        StrategyChip.Text = OverlaySettings.Instance.SolverStrategy switch
+        int strategy = OverlaySettings.Instance.SolverStrategy;
+        StrategyChip.Text = strategy switch
         {
             0 => "SAFE",
-            1 => "AGGRESSIVE",
+            1 => "CASCADE HUNTER",
             2 => "SPEED",
+            3 => "TARGET HUNTER",
             _ => "?",
         };
+        // Target selector is only relevant for the Target Hunter strategy. Hidden for
+        // every other strategy so users don't see the (unreliable) labeler dropdown.
+        Visibility targetVis = strategy == 3 ? Visibility.Visible : Visibility.Collapsed;
+        TargetLabel.Visibility = targetVis;
+        TargetComboBox.Visibility = targetVis;
     }
 
     private static readonly Brush AheadBrush = new SolidColorBrush(Color.FromRgb(100, 240, 100));
@@ -56,8 +63,9 @@ public partial class ToolbarWindow : Window
             LivePlaceholderText.Text = "no active game";
             LivePlaceholderText.Visibility = Visibility.Visible;
             CompareSafeText.Visibility = Visibility.Collapsed;
-            CompareAggressiveText.Visibility = Visibility.Collapsed;
+            CompareCascadeHunterText.Visibility = Visibility.Collapsed;
             CompareSpeedText.Visibility = Visibility.Collapsed;
+            CompareTargetHunterText.Visibility = Visibility.Collapsed;
             return;
         }
 
@@ -72,13 +80,17 @@ public partial class ToolbarWindow : Window
 
         // Per-strategy comparison rows.
         RenderStrategyRow(CompareSafeText, snap.PerStrategy[0], snap.Score);
-        RenderStrategyRow(CompareAggressiveText, snap.PerStrategy[1], snap.Score);
+        RenderStrategyRow(CompareCascadeHunterText, snap.PerStrategy[1], snap.Score);
         RenderStrategyRow(CompareSpeedText, snap.PerStrategy[2], snap.Score);
+        if (snap.PerStrategy.Length > 3)
+            RenderStrategyRow(CompareTargetHunterText, snap.PerStrategy[3], snap.Score);
+        else
+            CompareTargetHunterText.Visibility = Visibility.Collapsed;
     }
 
-    // Column widths chosen so the longest strategy name ("Aggressive" = 10 chars) and
+    // Column widths chosen so the longest strategy name ("Cascade Hunter" = 14 chars) and
     // 4-digit scores both fit. Consolas is monospace so PadLeft/PadRight = visual alignment.
-    private const int LabelColWidth = 14;   // "vs Aggressive:"
+    private const int LabelColWidth = 18;   // "vs Cascade Hunter:"
     private const int ScoreColWidth = 4;    // up to 4-digit scores
     private const int DeltaColWidth = 7;    // "(+1234)" / "(-1234)"
 

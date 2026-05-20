@@ -32,6 +32,13 @@ public enum SolverStrategy
     /// devalues lookahead. Best when going for fast high-score finishes vs long grinds.
     /// </summary>
     Speed = 2,
+    /// <summary>
+    /// Target Hunter: aggressively prioritize matches of the user-selected sidebar item
+    /// (boosted target multiplier 20× vs 5× baseline). Otherwise mirrors Safe's scoring.
+    /// Depends on ItemMatcher labeling being available; the toolbar's Target dropdown
+    /// only appears under this strategy.
+    /// </summary>
+    TargetHunter = 3,
 }
 
 /// <summary>
@@ -83,17 +90,26 @@ public static class Solver
     private static (double cascadeStepBase, double cascadeStepDecay,
                     bool turnBonusAllSteps, double bottomBonusPerRow,
                     double lookaheadDiscount,
-                    double fourMatchTurnBonus, double fiveMatchTurnBonus)
+                    double fourMatchTurnBonus, double fiveMatchTurnBonus,
+                    double secondPlyDiscount,
+                    double targetMultiplier)
         StrategyParams(SolverStrategy s) => s switch
         {
+            // Cascade Hunter: 2-turn lookahead via beam search. Heavy cascade weighting
+            // (0.85 base, 0.9 decay → deep cascades still valuable), 2.0 bottom-row premium
+            // (max gravity disruption → more cascade chances), lookahead at 0.8, AND a
+            // second-ply discount of 0.5 enables the actual 2-ply tree search. Free-turn
+            // bonuses lifted 1.25× because each preserved turn = another cascade shot.
             SolverStrategy.AggressiveCascade => (
-                cascadeStepBase: 0.7,
-                cascadeStepDecay: 0.85,
+                cascadeStepBase: 0.85,
+                cascadeStepDecay: 0.9,
                 turnBonusAllSteps: true,
-                bottomBonusPerRow: 1.5,
-                lookaheadDiscount: 0.5,
-                fourMatchTurnBonus: FourMatchTurnBonus,
-                fiveMatchTurnBonus: FiveMatchTurnBonus),
+                bottomBonusPerRow: 2.0,
+                lookaheadDiscount: 0.8,
+                fourMatchTurnBonus: FourMatchTurnBonus * 1.25,
+                fiveMatchTurnBonus: FiveMatchTurnBonus * 1.25,
+                secondPlyDiscount: 0.5,
+                targetMultiplier: TargetMultiplier),
             SolverStrategy.Speed => (
                 cascadeStepBase: 0.7,
                 cascadeStepDecay: 0.85,
@@ -101,7 +117,21 @@ public static class Solver
                 bottomBonusPerRow: 1.5,
                 lookaheadDiscount: 0.2,
                 fourMatchTurnBonus: FourMatchTurnBonus * 0.25,
-                fiveMatchTurnBonus: FiveMatchTurnBonus * 0.25),
+                fiveMatchTurnBonus: FiveMatchTurnBonus * 0.25,
+                secondPlyDiscount: 0.0,
+                targetMultiplier: TargetMultiplier),
+            // Target Hunter: mirrors Safe's scoring but with a 4× target multiplier (20×
+            // vs 5× baseline). Only fires when SolverContext.TargetTypeId is set.
+            SolverStrategy.TargetHunter => (
+                cascadeStepBase: 0.3,
+                cascadeStepDecay: 0.7,
+                turnBonusAllSteps: false,
+                bottomBonusPerRow: 0.5,
+                lookaheadDiscount: 0.3,
+                fourMatchTurnBonus: FourMatchTurnBonus,
+                fiveMatchTurnBonus: FiveMatchTurnBonus,
+                secondPlyDiscount: 0.0,
+                targetMultiplier: TargetMultiplier * 4.0),
             _ /* Safe */ => (
                 cascadeStepBase: 0.3,
                 cascadeStepDecay: 0.7,
@@ -109,11 +139,22 @@ public static class Solver
                 bottomBonusPerRow: 0.5,
                 lookaheadDiscount: 0.3,
                 fourMatchTurnBonus: FourMatchTurnBonus,
-                fiveMatchTurnBonus: FiveMatchTurnBonus),
+                fiveMatchTurnBonus: FiveMatchTurnBonus,
+                secondPlyDiscount: 0.0,
+                targetMultiplier: TargetMultiplier),
         };
+
+    // Beam width for the 2-ply lookahead. Tuned to keep worst-case FindBestSwap under the
+    // 150 ms per-frame budget. ~84 swaps × beam × 84 swaps × cascade cost. Start small,
+    // lift if profiling shows headroom.
+    private const int TwoPlyBeam = 5;
 
     public static SwapRecommendation? FindBestSwap(Board board, out List<SwapRecommendation> topCandidates, SolverContext? context = null)
     {
+        SolverStrategy strategy = context?.Strategy ?? SolverStrategy.Safe;
+        var sp = StrategyParams(strategy);
+        bool useTwoPly = sp.secondPlyDiscount > 0;
+
         List<SwapRecommendation> all = new();
         foreach (Swap swap in Swap.AllAdjacent())
         {
@@ -125,21 +166,66 @@ public static class Solver
             double lookaheadScore = 0;
             if (result.FinalBoard is not null)
             {
-                foreach (Swap nextSwap in Swap.AllAdjacent())
+                if (useTwoPly)
                 {
-                    CascadeResult nextResult = CascadeSimulator.Resolve(result.FinalBoard, nextSwap);
-                    if (!nextResult.SwapLegal) continue;
-                    double nextScore = ScoreCascade(nextResult, context);
-                    if (nextScore > lookaheadScore) lookaheadScore = nextScore;
+                    lookaheadScore = ComputeTwoPlyLookahead(result.FinalBoard, context, sp.secondPlyDiscount);
+                }
+                else
+                {
+                    foreach (Swap nextSwap in Swap.AllAdjacent())
+                    {
+                        CascadeResult nextResult = CascadeSimulator.Resolve(result.FinalBoard, nextSwap);
+                        if (!nextResult.SwapLegal) continue;
+                        double nextScore = ScoreCascade(nextResult, context);
+                        if (nextScore > lookaheadScore) lookaheadScore = nextScore;
+                    }
                 }
             }
 
-            double totalScore = immediateScore + StrategyParams(context?.Strategy ?? SolverStrategy.Safe).lookaheadDiscount * lookaheadScore;
+            double totalScore = immediateScore + sp.lookaheadDiscount * lookaheadScore;
             all.Add(new SwapRecommendation(swap, totalScore, immediateScore, lookaheadScore, result));
         }
         all.Sort((a, b) => b.Score.CompareTo(a.Score));
         topCandidates = all.Take(15).ToList();
         return topCandidates.Count > 0 ? topCandidates[0] : null;
+    }
+
+    /// <summary>
+    /// 2-ply lookahead with beam pruning. Enumerates every legal swap on `level1Board`,
+    /// keeps the top <see cref="TwoPlyBeam"/> by their immediate cascade score, then for
+    /// each of those expands one more ply: find the best legal swap on the resulting board.
+    /// Returns max over beam members of (level1 score + secondPlyDiscount × best level2 score).
+    /// </summary>
+    private static double ComputeTwoPlyLookahead(Board level1Board, SolverContext? context, double secondPlyDiscount)
+    {
+        // Collect (score, post-cascade board) for every legal swap on level1Board.
+        List<(double s1, Board fb1)> level1 = new();
+        foreach (Swap n in Swap.AllAdjacent())
+        {
+            CascadeResult r1 = CascadeSimulator.Resolve(level1Board, n);
+            if (!r1.SwapLegal || r1.FinalBoard is null) continue;
+            level1.Add((ScoreCascade(r1, context), r1.FinalBoard));
+        }
+        if (level1.Count == 0) return 0;
+        level1.Sort((a, b) => b.s1.CompareTo(a.s1));
+
+        double bestCombined = 0;
+        int beam = Math.Min(TwoPlyBeam, level1.Count);
+        for (int i = 0; i < beam; i++)
+        {
+            (double s1, Board fb1) = level1[i];
+            double bestS2 = 0;
+            foreach (Swap n2 in Swap.AllAdjacent())
+            {
+                CascadeResult r2 = CascadeSimulator.Resolve(fb1, n2);
+                if (!r2.SwapLegal) continue;
+                double s2 = ScoreCascade(r2, context);
+                if (s2 > bestS2) bestS2 = s2;
+            }
+            double combined = s1 + secondPlyDiscount * bestS2;
+            if (combined > bestCombined) bestCombined = combined;
+        }
+        return bestCombined;
     }
 
     public static SwapRecommendation? FindBestSwap(Board board) => FindBestSwap(board, out _);
@@ -151,7 +237,9 @@ public static class Solver
         bool anyStepHasFive = false;
         (double cascadeStepBase, double cascadeStepDecay, bool turnBonusAllSteps,
          double bottomBonusPerRow, _,
-         double fourMatchBonus, double fiveMatchBonus) =
+         double fourMatchBonus, double fiveMatchBonus,
+         _,
+         double targetMult) =
             StrategyParams(context?.Strategy ?? SolverStrategy.Safe);
 
         // Track per-typeId match-cell counts across the whole cascade — used to detect
@@ -169,10 +257,10 @@ public static class Solver
             foreach (Match m in step)
             {
                 double matchScore = ScoreSingleMatch(m, bottomBonusPerRow);
-                // Apply target multiplier when the match is of the target item.
+                // Apply per-strategy target multiplier when the match is of the target item.
                 if (context?.TargetTypeId is int targetTypeId && m.Tile.TypeId == targetTypeId)
                 {
-                    matchScore *= TargetMultiplier;
+                    matchScore *= targetMult;
                 }
                 score += matchScore * stepWeight;
 

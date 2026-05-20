@@ -9,8 +9,9 @@ public partial class SettingsWindow : Window
     {
         // Index matches the OverlaySettings.SolverStrategy int value.
         "Safer picks. Cascade matches contribute less, turn bonuses only count when YOUR swap makes the 4+/5-match. Use when the board is hard to read.",
-        "Bets that big cascades down the column will fire. Counts chain matches at 70%+ weight, awards turn bonuses for any 4+/5-match in the cascade, heavy reward for bottom-row matches.",
+        "Looks 2 turns ahead via beam search. Heavy cascade weighting (0.85 base × 0.9 decay) and premium on bottom-row swaps (more gravity disruption → more cascade chances). Free turns valued 1.25× normal because each preserved turn = another cascade shot.",
         "Max score per turn, no concern for stretching the game. Quartered 4/5-match turn bonus (free turns matter less as the game drags — point density drops as more item types appear). Lookahead heavily discounted. Bet on scoring big NOW.",
+        "Aggressively prioritizes matches of the item you select in the toolbar (20× multiplier vs 5× baseline). Will sacrifice raw score to capture your target. EXPERIMENTAL — depends on item recognition which can mislabel similar-looking items; double-check the toolbar dropdown shows the right item before relying on this.",
     };
 
     public SettingsWindow()
