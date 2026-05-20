@@ -13,6 +13,15 @@ public sealed class PanelLocator : IDisposable
     private readonly double _matchThreshold;
     private bool _disposed;
 
+    // Last-found cache so we can do a fast local search around the previous hit instead
+    // of re-scanning the entire 4K frame every tick. Cleared when the local search misses
+    // (panel actually moved, vanished, or we've never found it).
+    private OpenCvRect? _lastFoundRect;
+    private int _lastFoundTemplateIdx = -1;
+    // ±80 px around the last hit. Generous enough to absorb small window drift / scroll,
+    // tight enough that the local match is ~1 ms vs ~600 ms full-frame.
+    private const int LocalSearchPadding = 80;
+
     /// <summary>
     /// Construct with a directory path or a single file path. If a directory, loads every
     /// "panel-title*.png" template found inside. If a file, loads just that one. Each frame
@@ -89,6 +98,36 @@ public sealed class PanelLocator : IDisposable
                 frameForMatch = converted;
             }
 
+            // Fast path: if we have a previous hit, search a ±LocalSearchPadding window
+            // around it for the SAME template. ~1 ms vs ~600 ms full-frame.
+            if (_lastFoundRect.HasValue && _lastFoundTemplateIdx >= 0
+                && _lastFoundTemplateIdx < _templates.Length)
+            {
+                OpenCvMat tpl = _templates[_lastFoundTemplateIdx];
+                OpenCvRect last = _lastFoundRect.Value;
+                int roiX = Math.Max(0, last.X - LocalSearchPadding);
+                int roiY = Math.Max(0, last.Y - LocalSearchPadding);
+                int roiW = Math.Min(frameForMatch.Width - roiX, tpl.Width + 2 * LocalSearchPadding);
+                int roiH = Math.Min(frameForMatch.Height - roiY, tpl.Height + 2 * LocalSearchPadding);
+                if (roiW >= tpl.Width && roiH >= tpl.Height)
+                {
+                    OpenCvRect roi = new(roiX, roiY, roiW, roiH);
+                    using OpenCvMat roiMat = new(frameForMatch, roi);
+                    using OpenCvMat result = new();
+                    Cv2.MatchTemplate(roiMat, tpl, result, TemplateMatchModes.CCoeffNormed);
+                    Cv2.MinMaxLoc(result, out _, out double maxVal, out _, out OpenCvSharp.Point maxLoc);
+                    if (maxVal >= _matchThreshold)
+                    {
+                        OpenCvRect found = new(maxLoc.X + roi.X, maxLoc.Y + roi.Y, tpl.Width, tpl.Height);
+                        _lastFoundRect = found;
+                        return new PanelLocation(found, maxVal, _templateNames[_lastFoundTemplateIdx]);
+                    }
+                }
+                // Local search missed — fall through to full-frame search (panel may have
+                // moved further than the window, or transitioned to a different template).
+            }
+
+            // Slow path: full-frame search against every template.
             double bestVal = double.NegativeInfinity;
             OpenCvSharp.Point bestLoc = default;
             int bestIdx = -1;
@@ -107,9 +146,16 @@ public sealed class PanelLocator : IDisposable
                 }
             }
 
-            if (bestIdx < 0 || bestVal < _matchThreshold) return null;
+            if (bestIdx < 0 || bestVal < _matchThreshold)
+            {
+                _lastFoundRect = null;
+                _lastFoundTemplateIdx = -1;
+                return null;
+            }
             OpenCvMat winner = _templates[bestIdx];
             OpenCvRect titleBar = new(bestLoc.X, bestLoc.Y, winner.Width, winner.Height);
+            _lastFoundRect = titleBar;
+            _lastFoundTemplateIdx = bestIdx;
             return new PanelLocation(titleBar, bestVal, _templateNames[bestIdx]);
         }
         finally

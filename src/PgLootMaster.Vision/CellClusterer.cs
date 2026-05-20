@@ -50,10 +50,17 @@ public sealed class CellClusterer
     private readonly Queue<byte[][]> _stableFrameBuffer = new();
     private const int StableFrameBufferDepth = 4;
 
-    // Exposed for the caller (OverlayWindow) to freeze display updates while the board is
-    // animating (pulse, cascade, etc). True only when the latest frame is similar enough to
-    // the previous frame to be considered settled.
+    // Signature-based stability: true when the per-cell BGR signatures barely changed
+    // from the previous frame. Tight thresholds (max-diff < 15). Used by the canonical-
+    // capture path which needs pixel-level identity for clean averaging.
     public bool LastFrameWasStable { get; private set; }
+    // Cluster-ID-based stability: true when the cluster IDs returned this frame are
+    // IDENTICAL to the cluster IDs returned last frame. More lenient than signature
+    // stability because the sticky-buffer absorbs pulse jitter, so cluster IDs lock in
+    // even while signatures still wiggle. Used by the OverlayWindow display gate so
+    // post-cascade swap recommendations appear within 1–2 ticks instead of waiting for
+    // pulse-aligned signature stability (which can take 20+ ticks during pulse).
+    public bool LastFrameClusterIdsStable { get; private set; }
     // True between a detected large change and the next canonical-rep recapture. While true,
     // the cluster IDs returned are mapped against the OLD canonical and are likely stale.
     public bool NeedsRecapture => _needsRecapture;
@@ -73,6 +80,8 @@ public sealed class CellClusterer
         _framesSinceLargeChangeEnded = 0;
         _needsRecapture = true;
         _stableFrameBuffer.Clear();
+        LastFrameWasStable = false;
+        LastFrameClusterIdsStable = false;
         ClustererLog.Write("Reset() — canonical dropped, next frame will recapture");
     }
 
@@ -195,6 +204,19 @@ public sealed class CellClusterer
         }
 
         LastFrameWasStable = isStableFrame;
+        // Cluster-ID stability: compare against the previous frame's IDs (captured in
+        // _previousStableIds before the assignment below). Exact match across all 49
+        // cells means the board has logically settled.
+        bool idsStable = false;
+        if (_previousStableIds is not null && _previousStableIds.Length == stableIds.Length)
+        {
+            idsStable = true;
+            for (int i = 0; i < stableIds.Length; i++)
+            {
+                if (stableIds[i] != _previousStableIds[i]) { idsStable = false; break; }
+            }
+        }
+        LastFrameClusterIdsStable = idsStable;
         _previousSignatures = signatures;
         _previousStableIds = (int[])stableIds.Clone();
         return stableIds;

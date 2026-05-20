@@ -162,11 +162,18 @@ public partial class OverlayWindow : Window
         if (now < _nextPanelDetectionUtc) return;
         _nextPanelDetectionUtc = now.AddMilliseconds(150);
 
+        // Per-phase timing — diagnosing why ticks are taking >1 s despite a 150 ms throttle.
+        System.Diagnostics.Stopwatch sw = System.Diagnostics.Stopwatch.StartNew();
+        long tStart = sw.ElapsedMilliseconds;
+        long tLocator = 0, tCells = 0, tSidebar = 0, tCluster = 0, tSplit = 0, tLabel = 0,
+             tSolve = 0, tGameOver = 0, tDispatch = 0;
+
         PanelLocation? loc;
         IReadOnlyList<OpenCvSharp.Rect> cells = Array.Empty<OpenCvSharp.Rect>();
         try
         {
             loc = _panelLocator.TryLocate(frame);
+            tLocator = sw.ElapsedMilliseconds - tStart;
             if (loc.HasValue)
             {
                 OpenCvMat bgrFrame;
@@ -183,13 +190,17 @@ public partial class OverlayWindow : Window
                 }
                 try
                 {
+                    long tBeforeCells = sw.ElapsedMilliseconds;
                     cells = _boardExtractor.TryDetectCells(bgrFrame, loc.Value.TitleBar);
+                    tCells = sw.ElapsedMilliseconds - tBeforeCells;
 
+                    long tBeforeSidebar = sw.ElapsedMilliseconds;
                     // Sidebar OCR runs on EVERY panel-found frame, decoupled from the
                     // cells==49 board-stability gate. The header values (Score, TurnsMade,
                     // TurnsLeft) need to update during cascade animations too, otherwise
                     // early-game turns get skipped while the board isn't fully settled.
                     _latestSidebarItems = _sidebarReader.ReadItems(bgrFrame, loc.Value.TitleBar);
+                    tSidebar = sw.ElapsedMilliseconds - tBeforeSidebar;
                     int sig = ComputeSidebarSignature(_latestSidebarItems);
                     if (sig != _lastSidebarSignature)
                     {
@@ -200,13 +211,16 @@ public partial class OverlayWindow : Window
 
                     if (cells.Count == BoardExtractor.GridDim * BoardExtractor.GridDim)
                     {
+                        long tBeforeCluster = sw.ElapsedMilliseconds;
                         // Borders are keyed by the cell clusterer (proven to give unique IDs per
                         // visually-distinct item). The ItemMatcher only labels each cluster with
                         // a sidebar item name for display — if its label is wrong, the borders
                         // still correctly separate distinct items.
                         _latestClusterIds = _cellClusterer.ClusterCells(bgrFrame, cells);
+                        tCluster = sw.ElapsedMilliseconds - tBeforeCluster;
                         if (_latestSidebarItems.Count > 0)
                         {
+                            long tBeforeSplit = sw.ElapsedMilliseconds;
                             _itemMatcher.SetTemplates(_latestSidebarItems);
                             // Hue-based post-split: catch the case where the clusterer merged
                             // visually-distinct items whose BGR signatures happen to be close.
@@ -222,12 +236,15 @@ public partial class OverlayWindow : Window
                             {
                                 _latestClusterIds = postSplit;
                             }
+                            tSplit = sw.ElapsedMilliseconds - tBeforeSplit;
                             // LabelClusters (cluster→item-name matching) is unreliable, so we
                             // ONLY run it when the user has opted in via the Target Hunter
                             // strategy. Other strategies don't need cluster→template mapping.
                             if (OverlaySettings.Instance.SolverStrategy == (int)SolverStrategy.TargetHunter)
                             {
+                                long tBeforeLabel = sw.ElapsedMilliseconds;
                                 _latestClusterToTemplate = _itemMatcher.LabelClusters(bgrFrame, cells, _latestClusterIds);
+                                tLabel = sw.ElapsedMilliseconds - tBeforeLabel;
                             }
                             else
                             {
@@ -289,26 +306,34 @@ public partial class OverlayWindow : Window
                 _sidebarReader.ResetForNewGame();
             }
         }
-        else if (found)
-        {
-            OverlayLog.Write($"PanelLocator: tracking, {cells.Count} cells, {clusterCount} clusters");
-        }
-
         _latestCells = cells;
-        // Display gate: update as soon as the cascade visually settles (LastFrameWasStable).
-        // We deliberately do NOT wait for the canonical recapture — sticky cluster IDs
-        // against the previous canonical are approximately right and the user wants the
-        // recommendation visible quickly after a move (before PG's pulse hint starts).
-        // Bootstrap exception: first frame after panel-lost goes through immediately.
+        // Display gate: update as soon as the cascade visually settles. Two parallel
+        // stability signals — signature-similarity (tight, pulse-blocked) OR cluster-ID
+        // identity vs prior frame (lenient, pulse-tolerant). Cluster-ID stability is the
+        // primary post-cascade unlock. Bootstrap exception: first frame after panel-lost
+        // goes through immediately.
         bool acceptThisFrame = found
             && clusterCount >= MinAcceptableClusters
             && cells.Count == BoardExtractor.GridDim * BoardExtractor.GridDim
-            && (_cellClusterer.LastFrameWasStable || _displayedCells.Count == 0);
+            && (_cellClusterer.LastFrameWasStable
+                || _cellClusterer.LastFrameClusterIdsStable
+                || _displayedCells.Count == 0);
+
+        if (found && _lastDetectionSucceeded)
+        {
+            OverlayLog.Write(
+                $"PanelLocator: tracking, {cells.Count} cells, {clusterCount} clusters, "
+                + $"sigStable={_cellClusterer.LastFrameWasStable}, "
+                + $"idsStable={_cellClusterer.LastFrameClusterIdsStable}, "
+                + $"accept={acceptThisFrame}");
+        }
         if (acceptThisFrame)
         {
             _displayedCells = cells;
             _displayedClusterIds = _latestClusterIds;
+            long tBeforeSolve = sw.ElapsedMilliseconds;
             _displayedRecommendation = TrySolve(_latestClusterIds);
+            tSolve = sw.ElapsedMilliseconds - tBeforeSolve;
         }
 
         // Game-history per-frame capture. OnFrame is a no-op when gameStyle is null or
@@ -343,7 +368,9 @@ public partial class OverlayWindow : Window
                 }
                 try
                 {
+                    long tBeforeGameOver = sw.ElapsedMilliseconds;
                     (int Score, int Turns)? go = _sidebarReader.TryReadGameOver(bgrFrame, loc.Value.TitleBar);
+                    tGameOver = sw.ElapsedMilliseconds - tBeforeGameOver;
                     if (go.HasValue)
                     {
                         _gameTracker.OverrideFinalFromResults(go.Value.Turns, go.Value.Score);
@@ -367,6 +394,7 @@ public partial class OverlayWindow : Window
         LiveComparisonSnapshot? liveSnap = BuildLiveSnapshot();
         Dispatcher.BeginInvoke(() => OnLiveComparisonChanged?.Invoke(liveSnap));
 
+        long tBeforeDispatch = sw.ElapsedMilliseconds;
         Dispatcher.Invoke(() =>
         {
             if (loc.HasValue)
@@ -403,6 +431,16 @@ public partial class OverlayWindow : Window
                 SuggestionCanvas.Visibility = Visibility.Collapsed;
             }
         });
+        tDispatch = sw.ElapsedMilliseconds - tBeforeDispatch;
+
+        long tTotal = sw.ElapsedMilliseconds;
+        if (found && tTotal > 100)
+        {
+            OverlayLog.Write(
+                $"TIMING tick={tTotal}ms  locator={tLocator}  cells={tCells}  sidebar={tSidebar}  "
+                + $"cluster={tCluster}  split={tSplit}  label={tLabel}  solve={tSolve}  "
+                + $"gameOver={tGameOver}  dispatch={tDispatch}");
+        }
     }
 
     private void DrawSuggestion(DpiScale dpi)
