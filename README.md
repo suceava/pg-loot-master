@@ -1,14 +1,46 @@
 # pg-loot-master
 
-Windows desktop overlay that watches Project: Gorgon's **Loot Master Match-3** minigame, recognizes the board, runs a cascade-aware solver, and draws the recommended swap on top of the game.
+Windows desktop overlay that watches Project: Gorgon's **Match-3 minigames** (Loot Master + Cashfall), recognizes the board, runs a cascade-aware solver, and draws the recommended swap on top of the game.
 
-## Status
+## What it does
 
-Working end-to-end. Live overlay tracks PG's Match-3 panels (Loot Master + Cashfall) via multi-template matching, recognizes the 7×7 board, OCR's the sidebar (item names, capture counts/✓, Score, Turns Made, Turns Left, and the post-game results modal), runs a 1-ply cascade-aware solver, and draws the recommended swap on the board. A toolbar shows the active solver strategy plus live per-strategy score comparisons vs prior runs at the current turn. Per-game history (turn-by-turn score, final score, duration, etc) persists across sessions; in-progress games are draft-saved and auto-resumed on restart. Solver supports three strategies — Safe (immediate-match conservative), AggressiveCascade (bet on chain reactions), and Speed (max score per turn, devalues turn preservation) — switchable in Settings. Phases 0–4 + 3d landed; subsequent features in commit history.
+Live overlay that:
+- Detects when a Match-3 panel is on screen (Loot Master or Cashfall).
+- Recognizes the 7×7 board, the sidebar items + counts + ✓ marks, your current Score / Turns Made / Turns Left, and the post-game results modal.
+- Runs a cascade-aware solver and draws a pink highlight on the two tiles to swap.
+- Tracks per-game history (turn-by-turn score, final score, duration). Survives restarts mid-game.
+- Shows live comparisons in the toolbar against your historical best / average at the current turn, broken out per solver strategy.
+- Lets you pick a solver strategy: **Safe**, **Cascade Hunter** (2-ply lookahead), **Speed**, or **Target Hunter** (experimental).
+- History window with sortable aggregates, recent-games table, and cumulative-score charts.
+
+---
+
+# Run it
+
+If you just want to use the tool — no .NET / VS Code / git install required.
+
+1. Grab the latest `PgLootMaster-windows.zip` from [Releases](https://github.com/suceava/pg-loot-master/releases).
+2. Unzip anywhere. You'll get `PgLootMaster.exe` + a `Templates\` folder next to it. Keep them together.
+3. Launch Project: Gorgon in **borderless windowed** mode (exclusive fullscreen won't work — the capture API can't see the game).
+4. Double-click `PgLootMaster.exe`. A small green-bordered toolbar appears at the top-left of the screen. Drag it where you want it; the position is saved.
+5. Open a Match-3 panel in PG. The overlay should pick it up within a second or two and start drawing the recommended swap.
+
+Toolbar buttons:
+- **Settings** — pick which solver strategy to use, toggle debug overlays.
+- **History** — past games, aggregates per game+strategy, and a Charts tab.
+- **Close** — exit.
+
+The tool only reads pixels from the PG window (via Windows Graphics Capture). It never touches the game process, never sends or modifies network traffic.
+
+---
+
+# Develop
+
+For working on the code itself.
 
 ## Stack
 
-.NET 8 + WPF + C#, Windows-only. Windows.Graphics.Capture for screen capture, OpenCvSharp4 for board recognition.
+.NET 8 + WPF + C#, Windows-only. Windows.Graphics.Capture for screen capture, OpenCvSharp4 for board recognition, OxyPlot.Wpf for charts.
 
 ## Getting started (Windows machine)
 
@@ -39,8 +71,3 @@ powershell -ExecutionPolicy Bypass -File .\publish.ps1 -Release v1.0.0
 ```
 
 Builds, zips `PgLootMaster.exe` + `Templates\` into `dist\PgLootMaster-windows.zip`, and creates a GitHub release at the given tag (e.g. `v1.0.0`) with that zip as the asset. Requires `gh` CLI to be installed and authenticated. Release notes auto-generated from commits since the previous tag — override with `-Notes "..."`.
-
-## Repo conventions
-
-- Plan-of-record lives in `PLAN.md` at repo root.
-- Solution scaffolding (`PgLootMaster.sln` and `src/`, `test/`) gets created on the Windows machine where the WPF/Windows-SDK tooling can actually link binaries. The Mac side is for editing only.
