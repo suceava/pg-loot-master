@@ -19,11 +19,22 @@ Live overlay that:
 
 If you just want to use the tool — no .NET / VS Code / git install required.
 
+## Requirements
+
+- **Windows 10 (version 2004 / May 2020 update or later) or Windows 11**, x64. Older Windows won't run the bundled .NET 8 runtime.
+- **Visual C++ 2015–2022 Redistributable** for the OpenCV native libs. Almost always already installed (Steam, most games, modern Windows updates ship it). If the exe refuses to start with a `vcruntime140.dll`-like error, grab it from [Microsoft](https://aka.ms/vs/17/release/vc_redist.x64.exe).
+- **Project: Gorgon in borderless windowed mode.** Exclusive fullscreen bypasses the Windows Graphics Capture API and neither the overlay nor the screen reader will see anything.
+
+No .NET install is required — the runtime is bundled inside the single-file exe.
+
+## Steps
+
 1. Grab the latest `PgLootMaster-windows.zip` from [Releases](https://github.com/suceava/pg-loot-master/releases).
 2. Unzip anywhere. You'll get `PgLootMaster.exe` + a `Templates\` folder next to it. Keep them together.
-3. Launch Project: Gorgon in **borderless windowed** mode (exclusive fullscreen won't work — the capture API can't see the game).
-4. Double-click `PgLootMaster.exe`. A small green-bordered toolbar appears at the top-left of the screen. Drag it where you want it; the position is saved.
-5. Open a Match-3 panel in PG. The overlay should pick it up within a second or two and start drawing the recommended swap.
+3. Launch Project: Gorgon in **borderless windowed** mode.
+4. Double-click `PgLootMaster.exe`. First launch may show a Windows SmartScreen warning ("Windows protected your PC") because the exe isn't code-signed — click **More info** → **Run anyway**. One-time only.
+5. A small green-bordered toolbar appears. Drag it where you want it; the position is saved.
+6. Open a Match-3 panel in PG. The overlay should pick it up within a second or two and start drawing the recommended swap.
 
 Toolbar buttons:
 - **Settings** — pick which solver strategy to use, toggle debug overlays.
