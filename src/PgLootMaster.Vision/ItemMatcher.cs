@@ -80,6 +80,16 @@ public sealed class ItemMatcher
     public IReadOnlyList<SidebarItem> Templates => _templates;
     public int TemplateCount => _templatePrepared.Length;
 
+    /// <summary>
+    /// Drop the split-cache so the next SplitMixedClusters call re-evaluates from scratch.
+    /// Used by the Settings "Recompute clusters" button alongside CellClusterer.Reset().
+    /// </summary>
+    public void Reset()
+    {
+        _previousSplitIds = null;
+        _previousInputClusterIds = null;
+    }
+
     public void SetTemplates(IReadOnlyList<SidebarItem> templates)
     {
         foreach (PreparedCrop p in _templatePrepared) p.Dispose();

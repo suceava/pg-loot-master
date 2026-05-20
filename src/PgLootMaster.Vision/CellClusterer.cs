@@ -58,6 +58,24 @@ public sealed class CellClusterer
     // the cluster IDs returned are mapped against the OLD canonical and are likely stale.
     public bool NeedsRecapture => _needsRecapture;
 
+    /// <summary>
+    /// Force the clusterer to drop its canonical and re-capture on the next call. Used by
+    /// the Settings "Recompute clusters" button when the user sees the cluster IDs grouped
+    /// wrong and wants a fresh take.
+    /// </summary>
+    public void Reset()
+    {
+        _canonicalSignatures = null;
+        _canonicalClusterReps = null;
+        _previousSignatures = null;
+        _previousStableIds = null;
+        _consecutiveStableFrames = 0;
+        _framesSinceLargeChangeEnded = 0;
+        _needsRecapture = true;
+        _stableFrameBuffer.Clear();
+        ClustererLog.Write("Reset() — canonical dropped, next frame will recapture");
+    }
+
     public int[] ClusterCells(OpenCvMat bgrFrame, IReadOnlyList<OpenCvRect> cells)
     {
         if (cells.Count == 0) return Array.Empty<int>();

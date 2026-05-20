@@ -30,6 +30,16 @@ public sealed class OverlaySettings : INotifyPropertyChanged
         set => Set(ref _showDebugTextWindow, value);
     }
 
+    // Toggle for the pink swap-tile highlight drawn on the suggested swap. Default on.
+    // Players who want to play unaided (but still have games tracked in history) can flip
+    // this off without disabling the rest of the overlay.
+    private bool _showSwapHighlight = true;
+    public bool ShowSwapHighlight
+    {
+        get => _showSwapHighlight;
+        set => Set(ref _showSwapHighlight, value);
+    }
+
     private double _toolbarLeft = 40;
     public double ToolbarLeft
     {
@@ -87,6 +97,7 @@ public sealed class OverlaySettings : INotifyPropertyChanged
                 {
                     settings.ShowBoardOverlay = loaded.ShowBoardOverlay;
                     settings.ShowDebugTextWindow = loaded.ShowDebugTextWindow;
+                    settings.ShowSwapHighlight = loaded.ShowSwapHighlight;
                     settings.ToolbarLeft = loaded.ToolbarLeft;
                     settings.ToolbarTop = loaded.ToolbarTop;
                     settings.TargetItemName = loaded.TargetItemName;

@@ -136,6 +136,16 @@ public partial class OverlayWindow : Window
             _historyStore.SaveDraft(active);
         };
 
+        // Settings "Recompute clusters" button drops the clusterer's canonical + split
+        // cache so the next frame re-clusters from scratch. Used when the user sees the
+        // borders mis-grouped and wants a fresh take.
+        SettingsWindow.OnRecomputeRequested = () =>
+        {
+            _cellClusterer.Reset();
+            _itemMatcher.Reset();
+            OverlayLog.Write("User-requested cluster recompute — clusterer + matcher reset");
+        };
+
 
         Closed += (_, _) =>
         {
@@ -398,7 +408,9 @@ public partial class OverlayWindow : Window
     private void DrawSuggestion(DpiScale dpi)
     {
         SuggestionCanvas.Children.Clear();
-        if (_displayedRecommendation is null || _displayedCells.Count != SolverBoard.Dim * SolverBoard.Dim)
+        if (_displayedRecommendation is null
+            || _displayedCells.Count != SolverBoard.Dim * SolverBoard.Dim
+            || !OverlaySettings.Instance.ShowSwapHighlight)
         {
             SuggestionCanvas.Visibility = Visibility.Collapsed;
             return;
@@ -634,7 +646,7 @@ public partial class OverlayWindow : Window
                         : threshold is int thr
                             ? $"{item.CaptureCount ?? 0}/{thr}"
                             : (item.CaptureCount?.ToString() ?? "—");
-                    sb.AppendLine($"  {i:D2}: {name} [{status}]");
+                    sb.AppendLine($"  {name} [{status}]");
                 }
             }
             // Cluster→Item section intentionally hidden — matcher labels unreliable.

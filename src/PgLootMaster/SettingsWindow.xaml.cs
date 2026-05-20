@@ -14,11 +14,16 @@ public partial class SettingsWindow : Window
         "Aggressively prioritizes matches of the item you select in the toolbar (20× multiplier vs 5× baseline). Will sacrifice raw score to capture your target. EXPERIMENTAL — depends on item recognition which can mislabel similar-looking items; double-check the toolbar dropdown shows the right item before relying on this.",
     };
 
+    // Set by App startup so the "Recompute clusters" button can ask the overlay to drop
+    // its canonical and re-cluster on the next frame.
+    public static Action? OnRecomputeRequested { get; set; }
+
     public SettingsWindow()
     {
         InitializeComponent();
         ShowBoardOverlayCheckBox.IsChecked = OverlaySettings.Instance.ShowBoardOverlay;
         ShowDebugTextWindowCheckBox.IsChecked = OverlaySettings.Instance.ShowDebugTextWindow;
+        ShowSwapHighlightCheckBox.IsChecked = OverlaySettings.Instance.ShowSwapHighlight;
         int idx = OverlaySettings.Instance.SolverStrategy;
         if (idx < 0 || idx >= StrategyComboBox.Items.Count) idx = 0;
         StrategyComboBox.SelectedIndex = idx;
@@ -33,6 +38,16 @@ public partial class SettingsWindow : Window
     private void OnShowDebugTextWindowChanged(object sender, RoutedEventArgs e)
     {
         OverlaySettings.Instance.ShowDebugTextWindow = ShowDebugTextWindowCheckBox.IsChecked == true;
+    }
+
+    private void OnShowSwapHighlightChanged(object sender, RoutedEventArgs e)
+    {
+        OverlaySettings.Instance.ShowSwapHighlight = ShowSwapHighlightCheckBox.IsChecked == true;
+    }
+
+    private void OnRecomputeClustersClick(object sender, RoutedEventArgs e)
+    {
+        OnRecomputeRequested?.Invoke();
     }
 
     private void OnStrategyChanged(object sender, SelectionChangedEventArgs e)
