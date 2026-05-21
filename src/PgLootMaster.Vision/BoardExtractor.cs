@@ -12,47 +12,80 @@ public sealed class BoardExtractor
     private const int CellMaxSize = 200;
     private const double CellMinAspect = 0.7;
     private const double CellMaxAspect = 1.4;
+    // Need at least this many of the 49 cells detected to reliably resolve the grid.
+    private const int MinDetectedCells = GridDim * GridDim - 10;
 
     private static int _debugCount;
     private static readonly string DebugDir = Path.Combine(Path.GetTempPath(), "pg-loot-master-grid-debug");
 
-    private static List<OpenCvRect> SortIntoGrid(List<OpenCvRect> cells)
+    /// <summary>
+    /// Build a clean 7x7 grid of cell rects from the detected cell contours. The board is
+    /// a perfectly regular grid, so rather than SORT the contours into rows (which
+    /// interleaves rows when contour bounding boxes jitter a few pixels, mis-indexing
+    /// cells), this finds the 7 column-X and 7 row-Y centres from the natural gaps in the
+    /// detected centres and GENERATES the 49 rects. A generated grid cannot interleave or
+    /// put a cell at the wrong index, and it tolerates a handful of undetected cells.
+    /// </summary>
+    private static List<OpenCvRect> BuildGrid(List<OpenCvRect> cells)
     {
-        if (cells.Count != GridDim * GridDim) return cells;
+        double[] colX = AxisCentres(cells.Select(c => c.X + c.Width / 2.0));
+        double[] rowY = AxisCentres(cells.Select(c => c.Y + c.Height / 2.0));
 
-        int minY = cells.Min(c => c.Y);
-        int maxY = cells.Max(c => c.Y);
-        double rowSpan = Math.Max(1, (maxY - minY) / (double)(GridDim - 1));
+        int[] ws = cells.Select(c => c.Width).OrderBy(v => v).ToArray();
+        int[] hs = cells.Select(c => c.Height).OrderBy(v => v).ToArray();
+        int medW = ws[ws.Length / 2];
+        int medH = hs[hs.Length / 2];
 
-        List<List<OpenCvRect>> rows = new(GridDim);
-        for (int i = 0; i < GridDim; i++) rows.Add(new List<OpenCvRect>());
-        foreach (OpenCvRect cell in cells)
-        {
-            int row = (int)Math.Round((cell.Y - minY) / rowSpan);
-            row = Math.Clamp(row, 0, GridDim - 1);
-            rows[row].Add(cell);
-        }
-
-        if (rows.Any(r => r.Count != GridDim))
-        {
-            List<OpenCvRect> byY = cells.OrderBy(c => c.Y).ToList();
-            List<OpenCvRect> fallback = new(cells.Count);
-            for (int r = 0; r < GridDim; r++)
-            {
-                List<OpenCvRect> rowCells = byY.GetRange(r * GridDim, GridDim);
-                rowCells.Sort((a, b) => a.X.CompareTo(b.X));
-                fallback.AddRange(rowCells);
-            }
-            return fallback;
-        }
-
-        List<OpenCvRect> sorted = new(cells.Count);
+        List<OpenCvRect> grid = new(GridDim * GridDim);
         for (int r = 0; r < GridDim; r++)
         {
-            rows[r].Sort((a, b) => a.X.CompareTo(b.X));
-            sorted.AddRange(rows[r]);
+            for (int c = 0; c < GridDim; c++)
+            {
+                grid.Add(new OpenCvRect(
+                    (int)Math.Round(colX[c] - medW / 2.0),
+                    (int)Math.Round(rowY[r] - medH / 2.0),
+                    medW, medH));
+            }
         }
-        return sorted;
+        return grid;
+    }
+
+    /// <summary>
+    /// Resolve <see cref="GridDim"/> evenly-spaced axis centres from a set of cell-centre
+    /// coordinates: sort them, split into GridDim groups at the GridDim-1 largest gaps
+    /// (the inter-row / inter-column gaps), and average each group.
+    /// </summary>
+    private static double[] AxisCentres(IEnumerable<double> coords)
+    {
+        double[] sorted = coords.OrderBy(v => v).ToArray();
+        double[] centres = new double[GridDim];
+        if (sorted.Length <= GridDim)
+        {
+            for (int i = 0; i < GridDim; i++)
+                centres[i] = sorted.Length > 0 ? sorted[Math.Min(i, sorted.Length - 1)] : 0;
+            return centres;
+        }
+
+        // The GridDim-1 largest gaps separate the GridDim rows/columns.
+        List<(double gap, int idx)> gaps = new(sorted.Length - 1);
+        for (int i = 1; i < sorted.Length; i++) gaps.Add((sorted[i] - sorted[i - 1], i));
+        List<int> splits = gaps.OrderByDescending(g => g.gap)
+                                .Take(GridDim - 1)
+                                .Select(g => g.idx)
+                                .OrderBy(i => i)
+                                .ToList();
+
+        int start = 0;
+        for (int g = 0; g < GridDim; g++)
+        {
+            int end = g < splits.Count ? splits[g] : sorted.Length;
+            double sum = 0;
+            int count = 0;
+            for (int i = start; i < end; i++) { sum += sorted[i]; count++; }
+            centres[g] = count > 0 ? sum / count : sorted[Math.Min(start, sorted.Length - 1)];
+            start = end;
+        }
+        return centres;
     }
 
     public IReadOnlyList<OpenCvRect> TryDetectCells(OpenCvMat bgrFrame, OpenCvRect titleBar)
@@ -97,7 +130,10 @@ public sealed class BoardExtractor
             cells = cells.OrderByDescending(c => (long)c.Width * c.Height).Take(GridDim * GridDim).ToList();
         }
 
-        cells = SortIntoGrid(cells);
+        // Too few cells detected — the grid geometry can't be trusted; report no board.
+        if (cells.Count < MinDetectedCells) return Array.Empty<OpenCvRect>();
+
+        List<OpenCvRect> grid = BuildGrid(cells);
 
         if (Interlocked.Increment(ref _debugCount) == 1)
         {
@@ -107,16 +143,17 @@ public sealed class BoardExtractor
                 Cv2.ImWrite(Path.Combine(DebugDir, "roi.png"), roi);
                 Cv2.ImWrite(Path.Combine(DebugDir, "tile-mask.png"), mask);
                 using OpenCvMat annotated = roi.Clone();
-                foreach (Point[] c in contours)
-                {
-                    OpenCvRect b = Cv2.BoundingRect(c);
-                    Cv2.Rectangle(annotated, b, new Scalar(0, 0, 255), 2);
-                }
+                foreach (OpenCvRect d in cells)
+                    Cv2.Rectangle(annotated, new OpenCvRect(d.X - sx, d.Y - sy, d.Width, d.Height),
+                        new Scalar(0, 0, 255), 1);
+                foreach (OpenCvRect g in grid)
+                    Cv2.Rectangle(annotated, new OpenCvRect(g.X - sx, g.Y - sy, g.Width, g.Height),
+                        new Scalar(0, 255, 0), 2);
                 Cv2.ImWrite(Path.Combine(DebugDir, "all-contours.png"), annotated);
             }
             catch { }
         }
 
-        return cells;
+        return grid;
     }
 }

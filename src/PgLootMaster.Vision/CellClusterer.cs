@@ -28,12 +28,9 @@ internal static class ClustererLog
 /// Per-cell appearance signature. Two pulse-invariant components:
 ///  - <see cref="Structure"/>: the LAB L* (luminance) channel of the icon crop, zero-meaned
 ///    and L2-normalized. Comparing two of these by dot product yields normalized
-///    cross-correlation (NCC) — invariant to brightness scale/offset, so PG's pulse and
-///    flashing animations contribute nothing. NCC measures the spatial PATTERN: distinct
-///    icon silhouettes (Oil vs Potato) correlate poorly.
-///  - <see cref="Color"/>: a 4x4 spatial grid of mean LAB a*/b* chrominance. Chrominance
-///    separates same-shape / different-color items (yellow Oil vs red Oil) that structure
-///    NCC alone would merge.
+///    cross-correlation (NCC) — invariant to brightness, so PG's pulse/flash animations
+///    contribute nothing. NCC measures the spatial PATTERN.
+///  - <see cref="Color"/>: a 4x4 spatial grid of mean LAB a*/b* chrominance.
 /// </summary>
 internal sealed class CellSignature
 {
@@ -50,17 +47,20 @@ internal sealed class CellSignature
 /// <summary>
 /// Groups the 49 board cells by item identity.
 ///
-/// Two design pillars, both aimed at "no flicker, ever":
-///  1. The canonical cluster set is captured ONCE per game from an averaged still board.
-///     A match-3 game has a fixed item roster, so it stays valid for the whole game.
-///  2. Cluster IDs are FROZEN between cascades. They are recomputed only once per cascade —
-///     after the board has been structurally still for several frames — from the average
-///     of those still frames. Flashing/pulse is a brightness effect; structure NCC is
-///     brightness-invariant, so flashing never registers as motion and never triggers a
-///     recompute. Cluster IDs therefore physically cannot change while the board sits
-///     still, no matter how the tiles flash.
+/// Clustering is purely metric-driven: two groups merge only if they are genuinely close
+/// (below <see cref="ClusterThreshold"/>). There is NO forced cluster count — the number
+/// of clusters falls out of the data, so two visually-different items can never be fused
+/// just to hit a target N. (The Loot Master board starts with 4 tile types and gains one
+/// per captured item up to 7; the count is dynamic and not reliably known up front, which
+/// is exactly why it is not used.)
 ///
-/// A new game or the "Recompute clusters" button calls <see cref="Reset"/>.
+/// The canonical cluster set is captured once from an averaged still board. When cells
+/// appear that match no existing rep — a freshly-introduced tile type — a new rep is
+/// APPENDED for them and every cell re-assigned the same commit, so the new tiles land in
+/// the right cluster immediately. The canonical only ever grows; existing reps are never
+/// lost. Cluster IDs are FROZEN between cascades and recomputed once per cascade.
+///
+/// Every commit logs the full 7x7 grid of clusterID:matchDistance for diagnostics.
 /// </summary>
 public sealed class CellClusterer
 {
@@ -77,20 +77,33 @@ public sealed class CellClusterer
     private const double CenterCropFraction = 0.58;
 
     // Structure NCC distance (1 - correlation) is in [0, 2]; scale it up so it shares a
-    // comparable numeric range with the color mean-abs-diff before the two are summed.
+    // comparable numeric range with the color distance before the two are summed.
     private const double StructWeight = 100.0;
 
-    // Agglomerative merge floor. Two clusters are merged only while the closest remaining
-    // pair is below this. Same-item cells land ~3-13 apart; distinct items ~20+ (even the
-    // hardest case — two same-shape oils — is ~35+ thanks to the color term). 16 sits in
-    // the gap, so distinct items are NEVER merged.
-    private const double SimilarityThreshold = 16.0;
+    // Two clusters merge only while their distance is below this. With the top-3 region
+    // color metric (see Distance), same-item pairs land well under it and visually
+    // distinct items well over it — so distinct items are never merged.
+    private const double ClusterThreshold = 30.0;
 
-    // Canonical capture: collect WarmupFrames still frames, then cluster their per-cell
-    // average. MaxWarmupFrames is a hard cap so a never-fully-still board still captures.
-    private const int WarmupFrames = 6;
-    private const int MaxWarmupFrames = 30;
-    private const int BufferDepth = 6;
+    // A cell whose best match to EVERY canonical rep exceeds this resembles no known tile
+    // type — a freshly-introduced item with no rep yet. Such cells get a new rep appended.
+    // Clean settled tiles match their rep at ~0-6, an unrepresented tile reads 100+, so
+    // this sits in a wide empty gap.
+    private const double NewTypeMatchThreshold = 34.0;
+
+    // Lower bound on cluster count for the main board clustering — a guard against a
+    // pathological full collapse.
+    private const int MinClusters = 2;
+
+    // Canonical capture: the board must be genuinely STILL for this many consecutive
+    // frames, then the canonical is clustered from their per-cell average. There is NO
+    // force-capture fallback — capturing during a cascade/dissolve animation produces a
+    // garbage canonical that scrambles every later match. If the board never settles, no
+    // canonical is captured (the overlay simply shows nothing until it does).
+    // BufferDepth spans a "suggested move" pulse cycle so the best-frame assignment sees
+    // each hint tile near its natural (un-scaled) size.
+    private const int WarmupFrames = 10;
+    private const int BufferDepth = 8;
 
     // Per-cell structure-only interframe distance above this = that cell's tile is in
     // motion. StructMotionMinCells of them = the board is mid-cascade. Structure NCC is
@@ -99,35 +112,57 @@ public sealed class CellClusterer
     private const int StructMotionMinCells = 5;
     private const double StructStillAvgThreshold = 8.0;
 
-    // The board must be structurally still for this many consecutive frames before its
-    // cluster IDs are (re)committed — long enough to be sure the cascade has fully ended.
-    private const int SettleConfirmFrames = 4;
+    // The board must be structurally still for this many consecutive frames before the
+    // re-commit logic begins evaluating.
+    private const int SettleConfirmFrames = 2;
+    // Hard cap on re-commit deferral — bounds the post-move wait for the rare case of a
+    // genuinely-new tile type (which never matches a rep until one is appended).
+    private const int MaxCommitWaitFrames = 12;
+    // The re-commit is HELD until every cell's best match is below this — i.e. every cell,
+    // freshly-entered ones included, has found a clean SETTLED frame in the buffer. A tile
+    // still animating in resembles NO rep (distance 100+), so the commit waits it out
+    // instead of freezing a wrong assignment. Settled tiles sit at ~2-6, so 20 is a
+    // wide-margin "everything has settled" line.
+    private const double CommitClearThreshold = 20.0;
 
     private List<CellSignature>? _canonicalClusterReps;
     private CellSignature[]? _previousSignatures;
     private int[]? _settledIds;
+    private double[]? _settledDists;
     private readonly Queue<CellSignature[]> _stillBuffer = new();
     private int _stillCount;
-    private int _framesSinceReset;
+    private bool _committedThisSettle;
+    private int _framesWaitingToCommit;
 
     /// <summary>
-    /// True once the board has been still long enough for its cluster IDs to be committed.
-    /// Both this and <see cref="LastFrameClusterIdsStable"/> drive the OverlayWindow
-    /// display gate; they are equal by construction (IDs are only ever committed on a
-    /// confirmed-still frame).
+    /// True once the board has settled AND its cluster IDs have been committed. Both this
+    /// and <see cref="LastFrameClusterIdsStable"/> drive the OverlayWindow display gate.
     /// </summary>
     public bool LastFrameWasStable { get; private set; }
 
     /// <inheritdoc cref="LastFrameWasStable"/>
     public bool LastFrameClusterIdsStable { get; private set; }
 
+    /// <summary>
+    /// Per-cell best-match distance to the canonical, parallel to the last
+    /// <see cref="ClusterCells"/> result. A clean settled tile reads ~2-6; a cell that
+    /// resembles no rep reads 100+. Exposed for the on-screen debug grid.
+    /// </summary>
+    public IReadOnlyList<double>? LastCellMatchDistances => _settledDists;
+
     /// <summary>True until the canonical has been captured for the current game.</summary>
     public bool NeedsRecapture => _canonicalClusterReps is null;
 
     /// <summary>
-    /// Sidebar item count. Advisory only — the threshold-based agglomerative clustering
-    /// finds the natural cluster count on its own, so this is currently unused. Kept on
-    /// the API because OverlayWindow still sets it.
+    /// PNG bytes of the latest cell-crop montage (the 49 per-cell crops the clusterer
+    /// actually consumed, labeled with cluster ID). Refreshed on every capture/commit.
+    /// Exposed so the overlay can show it live in the debug window.
+    /// </summary>
+    public byte[]? LastCropMontagePng { get; private set; }
+
+    /// <summary>
+    /// Unused — clustering is metric-driven and infers the cluster count itself; it does
+    /// not take a target. Kept on the API because OverlayWindow still sets it.
     /// </summary>
     public int? TargetMinClusterCount { get; set; }
 
@@ -140,9 +175,11 @@ public sealed class CellClusterer
         _canonicalClusterReps = null;
         _previousSignatures = null;
         _settledIds = null;
+        _settledDists = null;
         _stillBuffer.Clear();
         _stillCount = 0;
-        _framesSinceReset = 0;
+        _committedThisSettle = false;
+        _framesWaitingToCommit = 0;
         LastFrameWasStable = false;
         LastFrameClusterIdsStable = false;
         ClustererLog.Write("Reset() — canonical dropped, will recapture after warmup");
@@ -161,8 +198,7 @@ public sealed class CellClusterer
 
         // --- Structure-only interframe motion ---
         // NCC structure is invariant to brightness, so PG's flashing/pulse moves this
-        // ≈ 0. Only genuine tile motion (a cascade) registers. This is what separates
-        // "the board is just flashing" from "tiles actually changed".
+        // ≈ 0. Only genuine tile motion (a cascade) registers.
         bool isStill = false;
         if (_previousSignatures is not null && _previousSignatures.Length == n)
         {
@@ -177,12 +213,8 @@ public sealed class CellClusterer
             isStill = (sum / n) < StructStillAvgThreshold && moving < StructMotionMinCells;
         }
         _previousSignatures = signatures;
-        _framesSinceReset++;
 
         // --- Still-frame buffer ---
-        // Holds only consecutive still frames; any motion clears it. So at any point it
-        // contains exactly the last min(_stillCount, BufferDepth) still frames, all of
-        // the SAME settled scene — safe to average.
         if (isStill)
         {
             _stillCount++;
@@ -193,30 +225,68 @@ public sealed class CellClusterer
         {
             _stillCount = 0;
             _stillBuffer.Clear();
+            _committedThisSettle = false;
+            _framesWaitingToCommit = 0;
         }
 
-        // --- Canonical capture (once per game) ---
-        if (_canonicalClusterReps is null
-            && (_stillCount >= WarmupFrames
-                || (_framesSinceReset >= MaxWarmupFrames && _stillBuffer.Count > 0)))
+        // --- Canonical capture (only from a genuinely still board) ---
+        if (_canonicalClusterReps is null && _stillCount >= WarmupFrames)
         {
-            _settledIds = CaptureCanonical(AverageBuffer());
+            CaptureCanonical(AverageBuffer());
+            _settledIds = AssignBestFrame(_stillBuffer.ToArray(), out double[] capDists);
+            _settledDists = capDists;
+            _committedThisSettle = true;
+            LogGrid("CAPTURE", _settledIds, capDists);
+            DumpCellCrops(bgrFrame, cells, _settledIds);
         }
 
         // --- Per-cascade re-commit ---
-        // Cluster IDs are frozen between cascades. They are recomputed exactly once per
-        // cascade: when the board hits SettleConfirmFrames consecutive still frames, the
-        // cascade is provably over. Re-cluster from the average of those still frames
-        // (averaging cancels any flash on the commit frame). Firing on '== ' makes this
-        // happen once per settle, not every subsequent still frame.
+        // Cluster IDs are frozen between cascades. After SettleConfirmFrames of structural
+        // stillness the cascade is positionally over — but freshly-entered tiles may still
+        // be animating in. The commit is HELD until every cell matches a rep cleanly
+        // (worstMatch below CommitClearThreshold); a still-animating tile resembles no rep,
+        // so this waits it out instead of freezing a wrong assignment. At the wait cap,
+        // any cell still matching nothing is a genuinely-new tile type → a rep is appended
+        // for it. Either way the new cluster IDs are then committed.
         if (_canonicalClusterReps is not null && _settledIds is not null
-            && _stillCount == SettleConfirmFrames)
+            && !_committedThisSettle && _stillCount >= SettleConfirmFrames)
         {
-            _settledIds = AssignToCanonical(AverageBuffer());
+            _framesWaitingToCommit++;
+            CellSignature[][] frames = _stillBuffer.ToArray();
+            int[] candidate = AssignBestFrame(frames, out double[] cellDists);
+            double worstMatch = 0;
+            for (int i = 0; i < cellDists.Length; i++)
+                if (cellDists[i] > worstMatch) worstMatch = cellDists[i];
+
+            if (worstMatch < CommitClearThreshold || _framesWaitingToCommit >= MaxCommitWaitFrames)
+            {
+                // Any cell matching NO existing rep is a freshly-introduced tile type.
+                // Cluster those cells and APPEND new reps (the canonical only grows;
+                // existing reps untouched), then re-assign so the new tiles — and the
+                // ones already on the board — all land in the right cluster THIS commit.
+                List<int> unmatched = new();
+                for (int i = 0; i < cellDists.Length; i++)
+                    if (cellDists[i] > NewTypeMatchThreshold) unmatched.Add(i);
+                if (unmatched.Count > 0)
+                {
+                    CellSignature[] avg = AverageBuffer();
+                    CellSignature[] newCells = new CellSignature[unmatched.Count];
+                    for (int k = 0; k < unmatched.Count; k++) newCells[k] = avg[unmatched[k]];
+                    _ = Cluster(newCells, 1, out List<CellSignature> newReps);
+                    _canonicalClusterReps.AddRange(newReps);
+                    ClustererLog.Write($"{unmatched.Count} cells matched no rep — appended " +
+                                       $"{newReps.Count} cluster(s); canonical now {_canonicalClusterReps.Count}");
+                    candidate = AssignBestFrame(frames, out cellDists);
+                }
+                _settledIds = candidate;
+                _settledDists = cellDists;
+                _committedThisSettle = true;
+                LogGrid($"COMMIT {_framesWaitingToCommit}f", candidate, cellDists);
+                DumpCellCrops(bgrFrame, cells, candidate);
+            }
         }
 
-        bool settled = _settledIds is not null && _settledIds.Length == n
-                       && _stillCount >= SettleConfirmFrames;
+        bool settled = _settledIds is not null && _settledIds.Length == n && _committedThisSettle;
         LastFrameWasStable = settled;
         LastFrameClusterIdsStable = settled;
 
@@ -225,41 +295,84 @@ public sealed class CellClusterer
             : new int[n];
     }
 
-    /// <summary>Assign each cell to its nearest canonical cluster representative.</summary>
-    private int[] AssignToCanonical(CellSignature[] signatures)
+    /// <summary>
+    /// Assign each cell to a canonical rep using its BEST frame across the still buffer:
+    /// for each cell, score every rep by the MINIMUM distance over all buffered frames,
+    /// then take the closest rep. PG's "suggested move" hint scale-animates two tiles
+    /// forever — they have no at-rest frame — but across a buffer spanning a pulse cycle
+    /// at least one frame catches each hint tile near its natural scale.
+    /// <paramref name="cellDists"/> returns each cell's best-match distance to the
+    /// canonical — the diagnostic + re-commit signal.
+    /// </summary>
+    private int[] AssignBestFrame(CellSignature[][] frames, out double[] cellDists)
     {
         List<CellSignature> reps = _canonicalClusterReps!;
-        int[] ids = new int[signatures.Length];
-        for (int i = 0; i < signatures.Length; i++)
+        int n = frames.Length > 0 ? frames[^1].Length : 0;
+        int[] ids = new int[n];
+        cellDists = new double[n];
+        for (int i = 0; i < n; i++)
         {
             int bestC = 0;
             double bestDist = double.MaxValue;
             for (int c = 0; c < reps.Count; c++)
             {
-                double d = Distance(signatures[i], reps[c]);
-                if (d < bestDist) { bestDist = d; bestC = c; }
+                double repBest = double.MaxValue;
+                foreach (CellSignature[] f in frames)
+                {
+                    if (f.Length != n) continue;
+                    double d = Distance(f[i], reps[c]);
+                    if (d < repBest) repBest = d;
+                }
+                if (repBest < bestDist) { bestDist = repBest; bestC = c; }
             }
             ids[i] = bestC;
+            cellDists[i] = bestDist < double.MaxValue ? bestDist : 0;
         }
         return ids;
     }
 
-    private int[] CaptureCanonical(CellSignature[] signatures)
+    /// <summary>
+    /// Diagnostic: log the 7x7 board as clusterID:matchDistance so a mis-categorized cell
+    /// can be told apart — low distance = a clean tile matched to a wrong rep (rep
+    /// problem); high distance = an unsettled / unrepresented cell.
+    /// </summary>
+    private static void LogGrid(string tag, int[] ids, double[] dists)
     {
-        int[] ids = Cluster(signatures, out List<CellSignature> reps);
+        if (ids.Length != 49 || dists.Length != 49)
+        {
+            ClustererLog.Write($"{tag}: {ids.Length} cells");
+            return;
+        }
+        System.Text.StringBuilder sb = new($"{tag} — grid (id:dist):");
+        for (int r = 0; r < 7; r++)
+        {
+            sb.Append(Environment.NewLine).Append("   ");
+            for (int c = 0; c < 7; c++)
+            {
+                int i = r * 7 + c;
+                sb.Append($"{ids[i]}:{dists[i]:F0}".PadRight(8));
+            }
+        }
+        ClustererLog.Write(sb.ToString());
+    }
+
+    private void CaptureCanonical(CellSignature[] signatures)
+    {
+        _ = Cluster(signatures, MinClusters, out List<CellSignature> reps);
         _canonicalClusterReps = reps;
         ClustererLog.Write($"Canonical CAPTURED: {reps.Count} clusters from {signatures.Length} cells " +
                            $"(avg of {_stillBuffer.Count} still frames)");
-        return ids;
     }
 
     /// <summary>
-    /// Agglomerative (centroid-linkage) clustering. Each cell starts as its own cluster;
-    /// the two closest clusters are merged repeatedly, and merging STOPS once the closest
-    /// remaining pair exceeds <see cref="SimilarityThreshold"/>. There is no forced
-    /// cluster count, so two genuinely distinct items can never be merged together.
+    /// Agglomerative (centroid-linkage) clustering. Repeatedly merges the two closest
+    /// clusters and STOPS once the closest remaining pair is at least
+    /// <see cref="ClusterThreshold"/> apart. No target cluster count — the number of
+    /// clusters is whatever the data supports, so two visually-distinct items are never
+    /// merged just to satisfy a count. <paramref name="minClusters"/> floors the result
+    /// (2 for the whole board; 1 when clustering a handful of new-type cells).
     /// </summary>
-    private static int[] Cluster(CellSignature[] sigs, out List<CellSignature> reps)
+    private static int[] Cluster(CellSignature[] sigs, int minClusters, out List<CellSignature> reps)
     {
         int n = sigs.Length;
         int[] ids = new int[n];
@@ -273,7 +386,8 @@ public sealed class CellClusterer
             centroids.Add(sigs[i]);
         }
 
-        while (clusters.Count > 1)
+        int floor = Math.Min(minClusters, n);
+        while (clusters.Count > floor)
         {
             int bestA = -1, bestB = -1;
             double bestDist = double.MaxValue;
@@ -285,7 +399,7 @@ public sealed class CellClusterer
                     if (d < bestDist) { bestDist = d; bestA = a; bestB = b; }
                 }
             }
-            if (bestA < 0 || bestDist > SimilarityThreshold) break;
+            if (bestA < 0 || bestDist >= ClusterThreshold) break;
 
             clusters[bestA].AddRange(clusters[bestB]);
             clusters.RemoveAt(bestB);
@@ -342,15 +456,28 @@ public sealed class CellClusterer
     }
 
     /// <summary>
-    /// Full distance: structure NCC distance + color mean-abs-diff. Both components are
-    /// pulse/flash-invariant. Same item ~3-13, distinct items ~20+.
+    /// Full distance: structure NCC distance + color distance. Both pulse/flash-invariant.
+    ///
+    /// Color distance = mean of the THREE most-different regions of the 4x4 LAB-chroma
+    /// grid. A plain mean over all 16 regions diluted a LOCALIZED color difference — e.g.
+    /// green vs red Oil differ only in the small liquid area, and averaging that against
+    /// ~13 identical glass/cork regions made the two oils measure as nearly the same item.
+    /// The top-3 keeps a localized difference loud, and still catches a whole-icon color
+    /// difference (the flowers) because then every region is high anyway.
     /// </summary>
     private static double Distance(CellSignature a, CellSignature b)
     {
-        double colorSum = 0;
         float[] ca = a.Color, cb = b.Color;
-        for (int i = 0; i < ca.Length; i++) colorSum += Math.Abs(ca[i] - cb[i]);
-        return StructureDistance(a, b) + colorSum / ca.Length;
+        double d0 = 0, d1 = 0, d2 = 0;   // three largest region diffs, descending
+        for (int r = 0; r < ColorGridDim * ColorGridDim; r++)
+        {
+            int idx = r * 2;
+            double rd = Math.Abs(ca[idx] - cb[idx]) + Math.Abs(ca[idx + 1] - cb[idx + 1]);
+            if (rd > d0) { d2 = d1; d1 = d0; d0 = rd; }
+            else if (rd > d1) { d2 = d1; d1 = rd; }
+            else if (rd > d2) { d2 = rd; }
+        }
+        return StructureDistance(a, b) + (d0 + d1 + d2) / 3.0;
     }
 
     /// <summary>
@@ -424,6 +551,50 @@ public sealed class CellClusterer
         {
             float inv = (float)(1.0 / norm);
             for (int i = 0; i < v.Length; i++) v[i] *= inv;
+        }
+    }
+
+    /// <summary>
+    /// Diagnostic: tile the 49 inner-58% crops (exactly what ComputeSignature consumes)
+    /// into one montage, each labeled with its assigned cluster ID, saved to TEMP. Lets us
+    /// SEE whether the clusterer is fed clean centered icons or garbage/offset crops.
+    /// </summary>
+    private void DumpCellCrops(OpenCvMat bgrFrame, IReadOnlyList<OpenCvRect> cells, int[] ids)
+    {
+        try
+        {
+            int n = cells.Count;
+            const int cols = 7;
+            int rows = (n + cols - 1) / cols;
+            const int tile = 80;
+            using OpenCvMat montage = new(rows * tile, cols * tile, MatType.CV_8UC3, Scalar.All(30));
+            for (int i = 0; i < n; i++)
+            {
+                int marginX = (int)(cells[i].Width * (1.0 - CenterCropFraction) / 2.0);
+                int marginY = (int)(cells[i].Height * (1.0 - CenterCropFraction) / 2.0);
+                OpenCvRect inner = new(cells[i].X + marginX, cells[i].Y + marginY,
+                    cells[i].Width - 2 * marginX, cells[i].Height - 2 * marginY);
+                OpenCvRect safe = ClampRect(inner, bgrFrame.Cols, bgrFrame.Rows);
+                if (safe.Width <= 0 || safe.Height <= 0) continue;
+                int r = i / cols, c = i % cols;
+                using (OpenCvMat crop = new(bgrFrame, safe))
+                using (OpenCvMat resized = new())
+                {
+                    Cv2.Resize(crop, resized, new Size(tile, tile));
+                    resized.CopyTo(montage[new OpenCvRect(c * tile, r * tile, tile, tile)]);
+                }
+                string label = i < ids.Length ? ids[i].ToString() : "?";
+                Cv2.PutText(montage, label, new Point(c * tile + 4, r * tile + 24),
+                    HersheyFonts.HersheySimplex, 0.8, new Scalar(0, 255, 255), 2);
+            }
+            Cv2.ImEncode(".png", montage, out byte[] montagePng);
+            LastCropMontagePng = montagePng;
+            string path = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "pg-loot-master-cellcrops.png");
+            File.WriteAllBytes(path, montagePng);
+        }
+        catch (Exception ex)
+        {
+            ClustererLog.Write($"DumpCellCrops failed: {ex.GetType().Name}: {ex.Message}");
         }
     }
 

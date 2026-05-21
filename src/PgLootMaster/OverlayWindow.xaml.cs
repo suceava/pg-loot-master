@@ -228,25 +228,18 @@ public partial class OverlayWindow : Window
                             : null;
                         _latestClusterIds = _cellClusterer.ClusterCells(bgrFrame, cells);
                         tCluster = sw.ElapsedMilliseconds - tBeforeCluster;
+                        UpdateCropMontage(_cellClusterer.LastCropMontagePng);
                         if (_latestSidebarItems.Count > 0)
                         {
-                            long tBeforeSplit = sw.ElapsedMilliseconds;
                             _itemMatcher.SetTemplates(_latestSidebarItems);
-                            // Hue-based post-split: catch the case where the clusterer merged
-                            // visually-distinct items whose BGR signatures happen to be close.
-                            int[] postSplit = _itemMatcher.SplitMixedClusters(bgrFrame, cells, _latestClusterIds);
-                            int postSplitCount = postSplit.Length == 0 ? 0 : postSplit.Max() + 1;
-                            // Safety cap: the board can have AT MOST one cluster per sidebar item.
-                            // The splitter can false-split items with internal color variation
-                            // (e.g. Fine Cotton Yarn / Health Potion both have red centers but
-                            // distinct outer textures). If the splitter exceeds that cap, revert
-                            // to pre-split — slightly merged is better than wrongly fragmented
-                            // (fragmentation makes the solver find no valid swap).
-                            if (postSplitCount <= _latestSidebarItems.Count)
-                            {
-                                _latestClusterIds = postSplit;
-                            }
-                            tSplit = sw.ElapsedMilliseconds - tBeforeSplit;
+                            // SplitMixedClusters BYPASSED. It was a band-aid for the old
+                            // BGR-mean clusterer, which routinely merged visually-distinct
+                            // items. The current clusterer (NCC structure + LAB chroma,
+                            // append-on-new-type) does not merge distinct items, so the
+                            // splitter is obsolete — and its cluster-ID renumbering was
+                            // itself corrupting the IDs the overlay draws. Use the
+                            // clusterer's IDs directly.
+                            tSplit = 0;
                             // LabelClusters (cluster→item-name matching) is unreliable, so we
                             // ONLY run it when the user has opted in via the Target Hunter
                             // strategy OR has the LabelerDebug window open (to measure
@@ -665,6 +658,29 @@ public partial class OverlayWindow : Window
     private int? _previouslyLoggedScore;
     private int? _previouslyLoggedTurnsMade;
 
+    private byte[]? _shownMontage;
+
+    /// <summary>Push the clusterer's latest cell-crop montage into the debug-window Image.</summary>
+    private void UpdateCropMontage(byte[]? png)
+    {
+        if (png is null || ReferenceEquals(png, _shownMontage)) return;
+        _shownMontage = png;
+        Dispatcher.BeginInvoke(() =>
+        {
+            try
+            {
+                System.Windows.Media.Imaging.BitmapImage bmp = new();
+                bmp.BeginInit();
+                bmp.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+                bmp.StreamSource = new System.IO.MemoryStream(png);
+                bmp.EndInit();
+                bmp.Freeze();
+                CropMontageImage.Source = bmp;
+            }
+            catch { }
+        });
+    }
+
     private SwapRecommendation? TrySolve(int[] clusterIds)
     {
         if (clusterIds.Length != SolverBoard.Dim * SolverBoard.Dim) return null;
@@ -692,7 +708,9 @@ public partial class OverlayWindow : Window
             int showCount = Math.Min(5, top.Count);
             if (top.Count > 5)
             {
-                double cutoff = top[showCount - 1].Score * 0.8;
+                // Show beyond the top 5 only for candidates genuinely close to the BEST
+                // one — a near-tie worth surfacing — not merely close to #5's score.
+                double cutoff = top[0].Score * 0.8;
                 for (int i = 5; i < top.Count && i < 12; i++)
                 {
                     if (top[i].Score < cutoff) break;
@@ -719,13 +737,17 @@ public partial class OverlayWindow : Window
                 }
             }
             // Cluster→Item section intentionally hidden — matcher labels unreliable.
-            sb.AppendLine("---- BOARD (cluster IDs) ----");
+            IReadOnlyList<double>? cellDists = _cellClusterer.LastCellMatchDistances;
+            sb.AppendLine("---- BOARD (clusterID:matchDist) ----");
             for (int r = 0; r < SolverBoard.Dim; r++)
             {
                 for (int c = 0; c < SolverBoard.Dim; c++)
                 {
-                    sb.Append(grid[r, c].ToString("D2"));
-                    sb.Append(' ');
+                    int idx = r * SolverBoard.Dim + c;
+                    string cell = cellDists is not null && idx < cellDists.Count
+                        ? $"{grid[r, c]:D2}:{cellDists[idx]:F0}"
+                        : grid[r, c].ToString("D2");
+                    sb.Append(cell.PadRight(7));
                 }
                 sb.AppendLine();
             }
