@@ -24,393 +24,349 @@ internal static class ClustererLog
     }
 }
 
+/// <summary>
+/// Per-cell appearance signature. Two pulse-invariant components:
+///  - <see cref="Structure"/>: the LAB L* (luminance) channel of the icon crop, zero-meaned
+///    and L2-normalized. Comparing two of these by dot product yields normalized
+///    cross-correlation (NCC) — invariant to brightness scale/offset, so PG's pulse and
+///    flashing animations contribute nothing. NCC measures the spatial PATTERN: distinct
+///    icon silhouettes (Oil vs Potato) correlate poorly.
+///  - <see cref="Color"/>: a 4x4 spatial grid of mean LAB a*/b* chrominance. Chrominance
+///    separates same-shape / different-color items (yellow Oil vs red Oil) that structure
+///    NCC alone would merge.
+/// </summary>
+internal sealed class CellSignature
+{
+    public float[] Structure { get; }
+    public float[] Color { get; }
+
+    public CellSignature(float[] structure, float[] color)
+    {
+        Structure = structure;
+        Color = color;
+    }
+}
+
+/// <summary>
+/// Groups the 49 board cells by item identity.
+///
+/// Two design pillars, both aimed at "no flicker, ever":
+///  1. The canonical cluster set is captured ONCE per game from an averaged still board.
+///     A match-3 game has a fixed item roster, so it stays valid for the whole game.
+///  2. Cluster IDs are FROZEN between cascades. They are recomputed only once per cascade —
+///     after the board has been structurally still for several frames — from the average
+///     of those still frames. Flashing/pulse is a brightness effect; structure NCC is
+///     brightness-invariant, so flashing never registers as motion and never triggers a
+///     recompute. Cluster IDs therefore physically cannot change while the board sits
+///     still, no matter how the tiles flash.
+///
+/// A new game or the "Recompute clusters" button calls <see cref="Reset"/>.
+/// </summary>
 public sealed class CellClusterer
 {
-    private const int SignatureSize = 24;
-    private const int SignatureLen = SignatureSize * SignatureSize * 3;
-    private const double SimilarityThreshold = 30.0;
-    private const double InterClusterMergeThreshold = 0.0;
-    private const double CenterCropFraction = 0.7;
-    private const double StableAvgInterframeThreshold = 5.0;
-    private const double StableMaxInterframeThreshold = 15.0;
-    private const double LargeChangeThreshold = 25.0;
-    private const double CellChangedThreshold = 30.0;
-    private const int MinChangedCellsForLargeChange = 3;
-    private const int StableFramesBeforeCapture = 3;
-    private const double StickyBuffer = 30.0;
+    // Icon crop is resized to SignatureSize x SignatureSize before feature extraction.
+    private const int SignatureSize = 32;
+    private const int StructDim = SignatureSize * SignatureSize;   // 1024
+    private const int ColorGridDim = 4;                            // 4x4 spatial color grid
+    private const int ColorRegion = SignatureSize / ColorGridDim;  // 8x8 px per region
+    private const int ColorDim = ColorGridDim * ColorGridDim * 2;  // 32  (a*, b* per region)
 
-    private byte[][]? _previousSignatures;
-    private byte[][]? _canonicalSignatures;
-    private List<byte[]>? _canonicalClusterReps;
-    private int[]? _previousStableIds;
-    private int _consecutiveStableFrames;
-    private int _framesSinceLargeChangeEnded;
-    private bool _needsRecapture = true;
-    private const int FramesBeforeForceRecapture = 5;
-    private readonly Queue<byte[][]> _stableFrameBuffer = new();
-    private const int StableFrameBufferDepth = 4;
+    // Crop to the central 58% of the cell rect — drops the wood-colored border (similar
+    // across every cell regardless of item) which would otherwise inflate correlation
+    // between distinct items and add positional noise.
+    private const double CenterCropFraction = 0.58;
 
-    // Signature-based stability: true when the per-cell BGR signatures barely changed
-    // from the previous frame. Tight thresholds (max-diff < 15). Used by the canonical-
-    // capture path which needs pixel-level identity for clean averaging.
-    public bool LastFrameWasStable { get; private set; }
-    // Cluster-ID-based stability: true when the cluster IDs returned this frame are
-    // IDENTICAL to the cluster IDs returned last frame. More lenient than signature
-    // stability because the sticky-buffer absorbs pulse jitter, so cluster IDs lock in
-    // even while signatures still wiggle. Used by the OverlayWindow display gate so
-    // post-cascade swap recommendations appear within 1–2 ticks instead of waiting for
-    // pulse-aligned signature stability (which can take 20+ ticks during pulse).
-    public bool LastFrameClusterIdsStable { get; private set; }
-    // True between a detected large change and the next canonical-rep recapture. While true,
-    // the cluster IDs returned are mapped against the OLD canonical and are likely stale.
-    public bool NeedsRecapture => _needsRecapture;
+    // Structure NCC distance (1 - correlation) is in [0, 2]; scale it up so it shares a
+    // comparable numeric range with the color mean-abs-diff before the two are summed.
+    private const double StructWeight = 100.0;
+
+    // Agglomerative merge floor. Two clusters are merged only while the closest remaining
+    // pair is below this. Same-item cells land ~3-13 apart; distinct items ~20+ (even the
+    // hardest case — two same-shape oils — is ~35+ thanks to the color term). 16 sits in
+    // the gap, so distinct items are NEVER merged.
+    private const double SimilarityThreshold = 16.0;
+
+    // Canonical capture: collect WarmupFrames still frames, then cluster their per-cell
+    // average. MaxWarmupFrames is a hard cap so a never-fully-still board still captures.
+    private const int WarmupFrames = 6;
+    private const int MaxWarmupFrames = 30;
+    private const int BufferDepth = 6;
+
+    // Per-cell structure-only interframe distance above this = that cell's tile is in
+    // motion. StructMotionMinCells of them = the board is mid-cascade. Structure NCC is
+    // brightness-invariant, so flashing/pulse never trips these — only real tile motion.
+    private const double StructMotionCellThreshold = 25.0;
+    private const int StructMotionMinCells = 5;
+    private const double StructStillAvgThreshold = 8.0;
+
+    // The board must be structurally still for this many consecutive frames before its
+    // cluster IDs are (re)committed — long enough to be sure the cascade has fully ended.
+    private const int SettleConfirmFrames = 4;
+
+    private List<CellSignature>? _canonicalClusterReps;
+    private CellSignature[]? _previousSignatures;
+    private int[]? _settledIds;
+    private readonly Queue<CellSignature[]> _stillBuffer = new();
+    private int _stillCount;
+    private int _framesSinceReset;
 
     /// <summary>
-    /// Force the clusterer to drop its canonical and re-capture on the next call. Used by
-    /// the Settings "Recompute clusters" button when the user sees the cluster IDs grouped
-    /// wrong and wants a fresh take.
+    /// True once the board has been still long enough for its cluster IDs to be committed.
+    /// Both this and <see cref="LastFrameClusterIdsStable"/> drive the OverlayWindow
+    /// display gate; they are equal by construction (IDs are only ever committed on a
+    /// confirmed-still frame).
+    /// </summary>
+    public bool LastFrameWasStable { get; private set; }
+
+    /// <inheritdoc cref="LastFrameWasStable"/>
+    public bool LastFrameClusterIdsStable { get; private set; }
+
+    /// <summary>True until the canonical has been captured for the current game.</summary>
+    public bool NeedsRecapture => _canonicalClusterReps is null;
+
+    /// <summary>
+    /// Sidebar item count. Advisory only — the threshold-based agglomerative clustering
+    /// finds the natural cluster count on its own, so this is currently unused. Kept on
+    /// the API because OverlayWindow still sets it.
+    /// </summary>
+    public int? TargetMinClusterCount { get; set; }
+
+    /// <summary>
+    /// Drop the canonical and re-capture after a fresh warmup. Called by the Settings
+    /// "Recompute clusters" button and by OverlayWindow when a new game starts.
     /// </summary>
     public void Reset()
     {
-        _canonicalSignatures = null;
         _canonicalClusterReps = null;
         _previousSignatures = null;
-        _previousStableIds = null;
-        _consecutiveStableFrames = 0;
-        _framesSinceLargeChangeEnded = 0;
-        _needsRecapture = true;
-        _stableFrameBuffer.Clear();
+        _settledIds = null;
+        _stillBuffer.Clear();
+        _stillCount = 0;
+        _framesSinceReset = 0;
         LastFrameWasStable = false;
         LastFrameClusterIdsStable = false;
-        ClustererLog.Write("Reset() — canonical dropped, next frame will recapture");
+        ClustererLog.Write("Reset() — canonical dropped, will recapture after warmup");
     }
 
     public int[] ClusterCells(OpenCvMat bgrFrame, IReadOnlyList<OpenCvRect> cells)
     {
         if (cells.Count == 0) return Array.Empty<int>();
+        int n = cells.Count;
 
-        byte[][] signatures = new byte[cells.Count][];
-        for (int i = 0; i < cells.Count; i++)
+        CellSignature[] signatures = new CellSignature[n];
+        for (int i = 0; i < n; i++)
         {
             signatures[i] = ComputeSignature(bgrFrame, cells[i]);
         }
 
-        bool isStableFrame = false;
-        bool isLargeChange = false;
-        if (_previousSignatures is not null && _previousSignatures.Length == cells.Count)
+        // --- Structure-only interframe motion ---
+        // NCC structure is invariant to brightness, so PG's flashing/pulse moves this
+        // ≈ 0. Only genuine tile motion (a cascade) registers. This is what separates
+        // "the board is just flashing" from "tiles actually changed".
+        bool isStill = false;
+        if (_previousSignatures is not null && _previousSignatures.Length == n)
         {
             double sum = 0;
-            double maxDiff = 0;
-            int changedCells = 0;
-            for (int i = 0; i < cells.Count; i++)
+            int moving = 0;
+            for (int i = 0; i < n; i++)
             {
-                double d = AverageAbsDifference(signatures[i], _previousSignatures[i]);
+                double d = StructureDistance(signatures[i], _previousSignatures[i]);
                 sum += d;
-                if (d > maxDiff) maxDiff = d;
-                if (d > CellChangedThreshold) changedCells++;
+                if (d > StructMotionCellThreshold) moving++;
             }
-            double avgInterframe = sum / cells.Count;
-            isStableFrame = avgInterframe < StableAvgInterframeThreshold
-                            && maxDiff < StableMaxInterframeThreshold;
-            isLargeChange = avgInterframe > LargeChangeThreshold
-                            || changedCells >= MinChangedCellsForLargeChange;
+            isStill = (sum / n) < StructStillAvgThreshold && moving < StructMotionMinCells;
         }
-
-        // Maintain a rolling buffer of recent stable-frame signatures so canonical capture
-        // can average over multiple frames — averaging out pulsating-tile drift so the
-        // pulsating cell ends up in the same cluster as its non-pulsing siblings.
-        if (isStableFrame)
-        {
-            _stableFrameBuffer.Enqueue(CloneSignatures(signatures));
-            while (_stableFrameBuffer.Count > StableFrameBufferDepth) _stableFrameBuffer.Dequeue();
-        }
-        else if (isLargeChange)
-        {
-            _stableFrameBuffer.Clear();
-        }
-
-        if (_canonicalClusterReps is null)
-        {
-            CaptureCanonical(AveragedStableSignatures(signatures));
-            _needsRecapture = false;
-            _consecutiveStableFrames = 0;
-            _framesSinceLargeChangeEnded = 0;
-        }
-        else if (isLargeChange)
-        {
-            if (!_needsRecapture) ClustererLog.Write("Large change detected -> needsRecapture=true");
-            _consecutiveStableFrames = 0;
-            _framesSinceLargeChangeEnded = 0;
-            _needsRecapture = true;
-        }
-        else if (_needsRecapture)
-        {
-            _framesSinceLargeChangeEnded++;
-            if (isStableFrame) _consecutiveStableFrames++;
-            else _consecutiveStableFrames = 0;
-
-            bool stabilityReached = _consecutiveStableFrames >= StableFramesBeforeCapture;
-            bool timeoutReached = _framesSinceLargeChangeEnded >= FramesBeforeForceRecapture;
-            if (stabilityReached || timeoutReached)
-            {
-                ClustererLog.Write($"Recapturing canonical (stable={stabilityReached}, timeout={timeoutReached}, buffer={_stableFrameBuffer.Count})");
-                CaptureCanonical(AveragedStableSignatures(signatures));
-                _needsRecapture = false;
-                _framesSinceLargeChangeEnded = 0;
-                _consecutiveStableFrames = 0;
-            }
-        }
-        else
-        {
-            _consecutiveStableFrames = 0;
-        }
-
-        int[] stableIds = new int[cells.Count];
-        if (_canonicalClusterReps is not null && _canonicalClusterReps.Count > 0)
-        {
-            for (int i = 0; i < cells.Count; i++)
-            {
-                int bestC = 0;
-                double bestDist = double.MaxValue;
-                for (int c = 0; c < _canonicalClusterReps.Count; c++)
-                {
-                    double d = AverageAbsDifference(signatures[i], _canonicalClusterReps[c]);
-                    if (d < bestDist)
-                    {
-                        bestDist = d;
-                        bestC = c;
-                    }
-                }
-
-                if (_previousStableIds is not null && i < _previousStableIds.Length)
-                {
-                    int prevId = _previousStableIds[i];
-                    if (prevId != bestC && prevId >= 0 && prevId < _canonicalClusterReps.Count)
-                    {
-                        double prevDist = AverageAbsDifference(signatures[i], _canonicalClusterReps[prevId]);
-                        if (prevDist - bestDist < StickyBuffer)
-                        {
-                            bestC = prevId;
-                        }
-                    }
-                }
-
-                stableIds[i] = bestC;
-            }
-        }
-        else
-        {
-            stableIds = GreedyCluster(signatures, out _);
-        }
-
-        LastFrameWasStable = isStableFrame;
-        // Cluster-ID stability: compare against the previous frame's IDs (captured in
-        // _previousStableIds before the assignment below). Exact match across all 49
-        // cells means the board has logically settled.
-        bool idsStable = false;
-        if (_previousStableIds is not null && _previousStableIds.Length == stableIds.Length)
-        {
-            idsStable = true;
-            for (int i = 0; i < stableIds.Length; i++)
-            {
-                if (stableIds[i] != _previousStableIds[i]) { idsStable = false; break; }
-            }
-        }
-        LastFrameClusterIdsStable = idsStable;
         _previousSignatures = signatures;
-        _previousStableIds = (int[])stableIds.Clone();
-        return stableIds;
-    }
+        _framesSinceReset++;
 
-    private byte[][] AveragedStableSignatures(byte[][] currentFrame)
-    {
-        if (_stableFrameBuffer.Count == 0) return currentFrame;
-        int cellCount = currentFrame.Length;
-        int sigLen = currentFrame[0].Length;
-        byte[][] avg = new byte[cellCount][];
-        for (int i = 0; i < cellCount; i++) avg[i] = new byte[sigLen];
-
-        int frameCount = 0;
-        foreach (byte[][] frame in _stableFrameBuffer)
+        // --- Still-frame buffer ---
+        // Holds only consecutive still frames; any motion clears it. So at any point it
+        // contains exactly the last min(_stillCount, BufferDepth) still frames, all of
+        // the SAME settled scene — safe to average.
+        if (isStill)
         {
-            if (frame.Length != cellCount) continue;
-            frameCount++;
-            for (int i = 0; i < cellCount; i++)
-            {
-                if (frame[i].Length != sigLen) continue;
-                for (int b = 0; b < sigLen; b++)
-                {
-                    avg[i][b] += (byte)(frame[i][b] / Math.Max(1, _stableFrameBuffer.Count));
-                }
-            }
+            _stillCount++;
+            _stillBuffer.Enqueue(signatures);
+            while (_stillBuffer.Count > BufferDepth) _stillBuffer.Dequeue();
         }
-        if (frameCount == 0) return currentFrame;
-        // Recompute as proper average to avoid rounding.
-        for (int i = 0; i < cellCount; i++)
+        else
         {
-            int[] sums = new int[sigLen];
-            int n = 0;
-            foreach (byte[][] frame in _stableFrameBuffer)
-            {
-                if (frame.Length != cellCount || frame[i].Length != sigLen) continue;
-                n++;
-                for (int b = 0; b < sigLen; b++) sums[b] += frame[i][b];
-            }
-            if (n == 0) { Array.Copy(currentFrame[i], avg[i], sigLen); continue; }
-            for (int b = 0; b < sigLen; b++) avg[i][b] = (byte)(sums[b] / n);
-        }
-        return avg;
-    }
-
-    private static byte[][] CloneSignatures(byte[][] sigs)
-    {
-        byte[][] clone = new byte[sigs.Length][];
-        for (int i = 0; i < sigs.Length; i++)
-        {
-            clone[i] = (byte[])sigs[i].Clone();
-        }
-        return clone;
-    }
-
-    private void CaptureCanonical(byte[][] signatures)
-    {
-        _canonicalSignatures = new byte[signatures.Length][];
-        for (int i = 0; i < signatures.Length; i++)
-        {
-            _canonicalSignatures[i] = (byte[])signatures[i].Clone();
+            _stillCount = 0;
+            _stillBuffer.Clear();
         }
 
-        int[] freshIds = GreedyCluster(signatures, out List<byte[]> freshReps);
-        _canonicalClusterReps = freshReps;
-        ClustererLog.Write($"Canonical CAPTURED: {freshReps.Count} clusters from {signatures.Length} cells");
+        // --- Canonical capture (once per game) ---
+        if (_canonicalClusterReps is null
+            && (_stillCount >= WarmupFrames
+                || (_framesSinceReset >= MaxWarmupFrames && _stillBuffer.Count > 0)))
+        {
+            _settledIds = CaptureCanonical(AverageBuffer());
+        }
+
+        // --- Per-cascade re-commit ---
+        // Cluster IDs are frozen between cascades. They are recomputed exactly once per
+        // cascade: when the board hits SettleConfirmFrames consecutive still frames, the
+        // cascade is provably over. Re-cluster from the average of those still frames
+        // (averaging cancels any flash on the commit frame). Firing on '== ' makes this
+        // happen once per settle, not every subsequent still frame.
+        if (_canonicalClusterReps is not null && _settledIds is not null
+            && _stillCount == SettleConfirmFrames)
+        {
+            _settledIds = AssignToCanonical(AverageBuffer());
+        }
+
+        bool settled = _settledIds is not null && _settledIds.Length == n
+                       && _stillCount >= SettleConfirmFrames;
+        LastFrameWasStable = settled;
+        LastFrameClusterIdsStable = settled;
+
+        return _settledIds is not null && _settledIds.Length == n
+            ? (int[])_settledIds.Clone()
+            : new int[n];
     }
 
-    private static int[] GreedyCluster(byte[][] signatures, out List<byte[]> reps)
+    /// <summary>Assign each cell to its nearest canonical cluster representative.</summary>
+    private int[] AssignToCanonical(CellSignature[] signatures)
     {
+        List<CellSignature> reps = _canonicalClusterReps!;
         int[] ids = new int[signatures.Length];
-        List<List<byte[]>> clusterMembers = new();
         for (int i = 0; i < signatures.Length; i++)
         {
-            int assigned = -1;
-            for (int c = 0; c < clusterMembers.Count; c++)
+            int bestC = 0;
+            double bestDist = double.MaxValue;
+            for (int c = 0; c < reps.Count; c++)
             {
-                double d = AverageAbsDifference(signatures[i], clusterMembers[c][0]);
-                if (d < SimilarityThreshold)
-                {
-                    assigned = c;
-                    break;
-                }
+                double d = Distance(signatures[i], reps[c]);
+                if (d < bestDist) { bestDist = d; bestC = c; }
             }
-            if (assigned < 0)
-            {
-                assigned = clusterMembers.Count;
-                clusterMembers.Add(new List<byte[]>());
-            }
-            clusterMembers[assigned].Add(signatures[i]);
-            ids[i] = assigned;
+            ids[i] = bestC;
         }
-
-        int sigLen = signatures.Length > 0 ? signatures[0].Length : 0;
-        List<byte[]> averages = new(clusterMembers.Count);
-        foreach (List<byte[]> members in clusterMembers)
-        {
-            averages.Add(ComputeAverage(members, sigLen));
-        }
-
-        // Post-process: merge small clusters (≤2 members) into their nearest larger cluster
-        // when the centroid distance is below SmallClusterMergeThreshold. This catches
-        // pulsating-tile outliers — a hint cell whose pulse phase pulled it just past the
-        // similarity threshold during canonical capture.
-        bool mergedSmall = true;
-        const double SmallClusterMergeThreshold = 35.0;
-        const int SmallClusterMaxMembers = 1;
-        while (mergedSmall && clusterMembers.Count > 1)
-        {
-            mergedSmall = false;
-            for (int a = 0; a < clusterMembers.Count; a++)
-            {
-                if (clusterMembers[a].Count > SmallClusterMaxMembers) continue;
-                int nearestB = -1;
-                double nearestDist = SmallClusterMergeThreshold;
-                for (int b = 0; b < clusterMembers.Count; b++)
-                {
-                    if (b == a) continue;
-                    if (clusterMembers[b].Count <= SmallClusterMaxMembers) continue;
-                    double d = AverageAbsDifference(averages[a], averages[b]);
-                    if (d < nearestDist) { nearestDist = d; nearestB = b; }
-                }
-                if (nearestB >= 0)
-                {
-                    int from = a;
-                    int to = nearestB;
-                    clusterMembers[to].AddRange(clusterMembers[from]);
-                    averages[to] = ComputeAverage(clusterMembers[to], sigLen);
-                    clusterMembers.RemoveAt(from);
-                    averages.RemoveAt(from);
-                    // After removing 'from', indices > from shift down by 1.
-                    int actualTo = to > from ? to - 1 : to;
-                    for (int i = 0; i < ids.Length; i++)
-                    {
-                        if (ids[i] == from) ids[i] = actualTo;
-                        else if (ids[i] > from) ids[i]--;
-                    }
-                    mergedSmall = true;
-                    break;
-                }
-            }
-        }
-
-        bool merged = true;
-        while (merged && clusterMembers.Count > 1)
-        {
-            merged = false;
-            int bestA = -1, bestB = -1;
-            double bestDist = InterClusterMergeThreshold;
-            for (int a = 0; a < clusterMembers.Count; a++)
-            {
-                for (int b = a + 1; b < clusterMembers.Count; b++)
-                {
-                    double d = AverageAbsDifference(averages[a], averages[b]);
-                    if (d < bestDist)
-                    {
-                        bestDist = d;
-                        bestA = a;
-                        bestB = b;
-                    }
-                }
-            }
-            if (bestA >= 0)
-            {
-                clusterMembers[bestA].AddRange(clusterMembers[bestB]);
-                clusterMembers.RemoveAt(bestB);
-                averages[bestA] = ComputeAverage(clusterMembers[bestA], sigLen);
-                averages.RemoveAt(bestB);
-                for (int i = 0; i < ids.Length; i++)
-                {
-                    if (ids[i] == bestB) ids[i] = bestA;
-                    else if (ids[i] > bestB) ids[i]--;
-                }
-                merged = true;
-            }
-        }
-
-        reps = averages;
         return ids;
     }
 
-    private static byte[] ComputeAverage(List<byte[]> members, int sigLen)
+    private int[] CaptureCanonical(CellSignature[] signatures)
     {
-        byte[] avg = new byte[sigLen];
-        for (int b = 0; b < sigLen; b++)
-        {
-            int sum = 0;
-            foreach (byte[] sig in members) sum += sig[b];
-            avg[b] = (byte)(sum / members.Count);
-        }
-        return avg;
+        int[] ids = Cluster(signatures, out List<CellSignature> reps);
+        _canonicalClusterReps = reps;
+        ClustererLog.Write($"Canonical CAPTURED: {reps.Count} clusters from {signatures.Length} cells " +
+                           $"(avg of {_stillBuffer.Count} still frames)");
+        return ids;
     }
 
-    private static byte[] ComputeSignature(OpenCvMat bgrFrame, OpenCvRect cell)
+    /// <summary>
+    /// Agglomerative (centroid-linkage) clustering. Each cell starts as its own cluster;
+    /// the two closest clusters are merged repeatedly, and merging STOPS once the closest
+    /// remaining pair exceeds <see cref="SimilarityThreshold"/>. There is no forced
+    /// cluster count, so two genuinely distinct items can never be merged together.
+    /// </summary>
+    private static int[] Cluster(CellSignature[] sigs, out List<CellSignature> reps)
+    {
+        int n = sigs.Length;
+        int[] ids = new int[n];
+        if (n == 0) { reps = new List<CellSignature>(); return ids; }
+
+        List<List<int>> clusters = new(n);
+        List<CellSignature> centroids = new(n);
+        for (int i = 0; i < n; i++)
+        {
+            clusters.Add(new List<int> { i });
+            centroids.Add(sigs[i]);
+        }
+
+        while (clusters.Count > 1)
+        {
+            int bestA = -1, bestB = -1;
+            double bestDist = double.MaxValue;
+            for (int a = 0; a < clusters.Count; a++)
+            {
+                for (int b = a + 1; b < clusters.Count; b++)
+                {
+                    double d = Distance(centroids[a], centroids[b]);
+                    if (d < bestDist) { bestDist = d; bestA = a; bestB = b; }
+                }
+            }
+            if (bestA < 0 || bestDist > SimilarityThreshold) break;
+
+            clusters[bestA].AddRange(clusters[bestB]);
+            clusters.RemoveAt(bestB);
+            centroids.RemoveAt(bestB);
+            List<CellSignature> members = new(clusters[bestA].Count);
+            foreach (int idx in clusters[bestA]) members.Add(sigs[idx]);
+            centroids[bestA] = Average(members);
+        }
+
+        for (int c = 0; c < clusters.Count; c++)
+        {
+            foreach (int idx in clusters[c]) ids[idx] = c;
+        }
+        reps = centroids;
+        return ids;
+    }
+
+    /// <summary>Per-cell average of every frame currently in the still buffer.</summary>
+    private CellSignature[] AverageBuffer()
+    {
+        CellSignature[][] frames = _stillBuffer.ToArray();
+        if (frames.Length == 0) return Array.Empty<CellSignature>();
+        int n = frames[^1].Length;
+        CellSignature[] result = new CellSignature[n];
+        List<CellSignature> perCell = new(frames.Length);
+        for (int i = 0; i < n; i++)
+        {
+            perCell.Clear();
+            foreach (CellSignature[] f in frames)
+            {
+                if (f.Length == n) perCell.Add(f[i]);
+            }
+            result[i] = perCell.Count > 0 ? Average(perCell) : frames[^1][i];
+        }
+        return result;
+    }
+
+    private static CellSignature Average(IReadOnlyList<CellSignature> members)
+    {
+        if (members.Count == 1) return members[0];
+        float[] structure = new float[StructDim];
+        float[] color = new float[ColorDim];
+        foreach (CellSignature s in members)
+        {
+            for (int i = 0; i < StructDim; i++) structure[i] += s.Structure[i];
+            for (int i = 0; i < ColorDim; i++) color[i] += s.Color[i];
+        }
+        int n = members.Count;
+        for (int i = 0; i < ColorDim; i++) color[i] /= n;
+        // Structure: the L2 renormalize is scale-invariant, so summing (vs averaging)
+        // the components first makes no difference — renormalize handles it.
+        Renormalize(structure);
+        return new CellSignature(structure, color);
+    }
+
+    /// <summary>
+    /// Full distance: structure NCC distance + color mean-abs-diff. Both components are
+    /// pulse/flash-invariant. Same item ~3-13, distinct items ~20+.
+    /// </summary>
+    private static double Distance(CellSignature a, CellSignature b)
+    {
+        double colorSum = 0;
+        float[] ca = a.Color, cb = b.Color;
+        for (int i = 0; i < ca.Length; i++) colorSum += Math.Abs(ca[i] - cb[i]);
+        return StructureDistance(a, b) + colorSum / ca.Length;
+    }
+
+    /// <summary>
+    /// Structure-only distance: NCC distance on the luminance channel. Both structure
+    /// vectors are zero-mean + unit-L2, so NCC == dot product. Invariant to brightness,
+    /// hence to PG's flashing/pulse — used for motion detection.
+    /// </summary>
+    private static double StructureDistance(CellSignature a, CellSignature b)
+    {
+        double dot = 0;
+        float[] sa = a.Structure, sb = b.Structure;
+        for (int i = 0; i < sa.Length; i++) dot += sa[i] * sb[i];
+        return (1.0 - dot) * StructWeight;
+    }
+
+    private static CellSignature ComputeSignature(OpenCvMat bgrFrame, OpenCvRect cell)
     {
         int marginX = (int)(cell.Width * (1.0 - CenterCropFraction) / 2.0);
         int marginY = (int)(cell.Height * (1.0 - CenterCropFraction) / 2.0);
@@ -418,25 +374,57 @@ public sealed class CellClusterer
             cell.Width - 2 * marginX, cell.Height - 2 * marginY);
         OpenCvRect safe = ClampRect(inner, bgrFrame.Cols, bgrFrame.Rows);
         if (safe.Width <= 0 || safe.Height <= 0)
-            return new byte[SignatureLen];
+            return new CellSignature(new float[StructDim], new float[ColorDim]);
 
         using OpenCvMat crop = new(bgrFrame, safe);
         using OpenCvMat resized = new();
         Cv2.Resize(crop, resized, new Size(SignatureSize, SignatureSize), 0, 0, InterpolationFlags.Area);
+        // Light blur → makes NCC tolerant of a pixel or two of cell-rect drift.
+        using OpenCvMat blurred = new();
+        Cv2.GaussianBlur(resized, blurred, new Size(3, 3), 0);
+        using OpenCvMat lab = new();
+        Cv2.CvtColor(blurred, lab, ColorConversionCodes.BGR2Lab);
 
-        byte[] data = new byte[SignatureLen];
+        float[] structure = new float[StructDim];
+        float[] color = new float[ColorDim];
         for (int y = 0; y < SignatureSize; y++)
         {
             for (int x = 0; x < SignatureSize; x++)
             {
-                Vec3b p = resized.At<Vec3b>(y, x);
-                int idx = (y * SignatureSize + x) * 3;
-                data[idx] = p.Item0;
-                data[idx + 1] = p.Item1;
-                data[idx + 2] = p.Item2;
+                Vec3b p = lab.At<Vec3b>(y, x);
+                structure[y * SignatureSize + x] = p.Item0;   // L*  (luminance → structure)
+                int gx = x / ColorRegion;
+                int gy = y / ColorRegion;
+                int idx = (gy * ColorGridDim + gx) * 2;
+                color[idx] += p.Item1;       // a*
+                color[idx + 1] += p.Item2;   // b*
             }
         }
-        return data;
+        int perRegion = ColorRegion * ColorRegion;
+        for (int i = 0; i < ColorDim; i++) color[i] /= perRegion;
+
+        Renormalize(structure);
+        return new CellSignature(structure, color);
+    }
+
+    /// <summary>Zero-mean then L2-normalize in place, so dot product == NCC.</summary>
+    private static void Renormalize(float[] v)
+    {
+        double mean = 0;
+        for (int i = 0; i < v.Length; i++) mean += v[i];
+        mean /= v.Length;
+        double norm = 0;
+        for (int i = 0; i < v.Length; i++)
+        {
+            v[i] -= (float)mean;
+            norm += v[i] * (double)v[i];
+        }
+        norm = Math.Sqrt(norm);
+        if (norm > 1e-6)
+        {
+            float inv = (float)(1.0 / norm);
+            for (int i = 0; i < v.Length; i++) v[i] *= inv;
+        }
     }
 
     private static OpenCvRect ClampRect(OpenCvRect r, int width, int height)
@@ -446,15 +434,5 @@ public sealed class CellClusterer
         int w = Math.Min(r.Width, width - x);
         int h = Math.Min(r.Height, height - y);
         return new OpenCvRect(x, y, w, h);
-    }
-
-    private static double AverageAbsDifference(byte[] a, byte[] b)
-    {
-        long sum = 0;
-        for (int i = 0; i < a.Length; i++)
-        {
-            sum += Math.Abs(a[i] - b[i]);
-        }
-        return (double)sum / a.Length;
     }
 }

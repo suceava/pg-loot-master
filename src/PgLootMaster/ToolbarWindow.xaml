@@ -26,22 +26,7 @@
                            FontWeight="Bold"
                            VerticalAlignment="Center"
                            Margin="2,0,12,0" />
-                <!-- Target selector only shown when active strategy = Target Hunter
-                     (visibility flipped in RefreshStrategyChip). -->
-                <TextBlock x:Name="TargetLabel"
-                           Text="Target:"
-                           Foreground="#FFCCCCCC"
-                           FontFamily="Consolas"
-                           FontSize="11"
-                           VerticalAlignment="Center"
-                           Margin="0,0,4,0"
-                           Visibility="Collapsed" />
-                <ComboBox x:Name="TargetComboBox"
-                          Width="180" Height="24"
-                          FontSize="11"
-                          Margin="0,0,12,0"
-                          Visibility="Collapsed"
-                          SelectionChanged="OnTargetChanged" />
+                <!-- Target dropdown moved to Settings window under the Solver section. -->
                 <Button x:Name="SettingsButton"
                         Content="Settings"
                         Width="64" Height="24"
@@ -54,6 +39,12 @@
                         FontSize="11"
                         Margin="0,0,4,0"
                         Click="OnHistoryClick" />
+                <Button x:Name="LabelerDebugButton"
+                        Content="Labeler"
+                        Width="64" Height="24"
+                        FontSize="11"
+                        Margin="0,0,4,0"
+                        Click="OnLabelerDebugClick" />
                 <Button x:Name="CloseButton"
                         Content="Close"
                         Width="56" Height="24"

@@ -12,6 +12,7 @@ public partial class App : Application
         overlay.Show();
 
         ToolbarWindow toolbar = new(overlay.HistoryStore);
+        toolbar.Overlay = overlay;
         toolbar.Show();
 
         // Hook the overlay's sidebar-items callback to the toolbar's dropdown so target

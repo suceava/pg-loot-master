@@ -1,10 +1,13 @@
 using System.Windows;
 using System.Windows.Controls;
+using PgLootMaster.Vision;
 
 namespace PgLootMaster;
 
 public partial class SettingsWindow : Window
 {
+    private bool _suppressTargetChanged;
+
     private static readonly string[] StrategyDescriptions = new[]
     {
         // Index matches the OverlaySettings.SolverStrategy int value.
@@ -18,7 +21,7 @@ public partial class SettingsWindow : Window
     // its canonical and re-cluster on the next frame.
     public static Action? OnRecomputeRequested { get; set; }
 
-    public SettingsWindow()
+    public SettingsWindow(System.Collections.Generic.IReadOnlyList<SidebarItem>? sidebarItems = null)
     {
         InitializeComponent();
         ShowBoardOverlayCheckBox.IsChecked = OverlaySettings.Instance.ShowBoardOverlay;
@@ -28,6 +31,58 @@ public partial class SettingsWindow : Window
         if (idx < 0 || idx >= StrategyComboBox.Items.Count) idx = 0;
         StrategyComboBox.SelectedIndex = idx;
         UpdateStrategyDescription();
+        RefreshTargetList(sidebarItems ?? System.Array.Empty<SidebarItem>());
+        UpdateTargetPanelVisibility();
+    }
+
+    /// <summary>
+    /// Refresh the Target dropdown with current uncaptured sidebar items. Called from
+    /// the constructor + by ToolbarWindow if the items change while Settings is open.
+    /// Preserves the currently-saved target selection by name.
+    /// </summary>
+    public void RefreshTargetList(System.Collections.Generic.IReadOnlyList<SidebarItem> items)
+    {
+        _suppressTargetChanged = true;
+        try
+        {
+            string? currentTarget = OverlaySettings.Instance.TargetItemName;
+            TargetComboBox.Items.Clear();
+            TargetComboBox.Items.Add("(no target)");
+            int selectIndex = 0;
+            foreach (SidebarItem it in items)
+            {
+                if (it.Captured) continue;
+                if (string.IsNullOrEmpty(it.Name)) continue;
+                int newIdx = TargetComboBox.Items.Add(it.Name);
+                if (it.Name == currentTarget) selectIndex = newIdx;
+            }
+            TargetComboBox.SelectedIndex = selectIndex;
+        }
+        finally
+        {
+            _suppressTargetChanged = false;
+        }
+    }
+
+    private void OnTargetChanged(object sender, SelectionChangedEventArgs e)
+    {
+        if (_suppressTargetChanged) return;
+        if (TargetComboBox.SelectedIndex <= 0)
+        {
+            OverlaySettings.Instance.TargetItemName = null;
+        }
+        else
+        {
+            OverlaySettings.Instance.TargetItemName = TargetComboBox.SelectedItem?.ToString();
+        }
+    }
+
+    private void UpdateTargetPanelVisibility()
+    {
+        // Target Hunter is strategy index 3 (matches SolverStrategy.TargetHunter).
+        TargetPanel.Visibility = StrategyComboBox.SelectedIndex == 3
+            ? Visibility.Visible
+            : Visibility.Collapsed;
     }
 
     private void OnShowBoardOverlayChanged(object sender, RoutedEventArgs e)
@@ -56,6 +111,7 @@ public partial class SettingsWindow : Window
         if (idx < 0) return;
         OverlaySettings.Instance.SolverStrategy = idx;
         UpdateStrategyDescription();
+        UpdateTargetPanelVisibility();
     }
 
     private void UpdateStrategyDescription()

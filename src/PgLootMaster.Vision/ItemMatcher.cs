@@ -27,8 +27,14 @@ internal sealed class PreparedCrop : IDisposable
     // color compositions (e.g. flower with yellow center + green leaves vs flask with
     // red liquid + gold trim).
     public OpenCvMat ChromaHist { get; }
+    // 4×4 spatial grid of mean LAB values, sampled from foreground pixels in each
+    // 12×12 sub-region of the 48×48 prepared image. Catches items that share OVERALL
+    // color (chromaHist matches) but differ at SPECIFIC SPATIAL POSITIONS — e.g.
+    // Cotton Yarn (brown ring + red center) vs Health Potion (gray ring + red center).
+    // Layout: spatialColorGrid[(row * 4 + col) * 3 + channel], channel = 0:L, 1:a, 2:b.
+    public double[] SpatialColorGrid { get; }
 
-    public PreparedCrop(OpenCvMat imageBgr, OpenCvMat imageGray, OpenCvMat mask, OpenCvMat hueHist, Scalar meanLab, double aspectRatio, Vec3b[] fingerprint, int maxSaturation, double[] huMoments, OpenCvMat chromaHist)
+    public PreparedCrop(OpenCvMat imageBgr, OpenCvMat imageGray, OpenCvMat mask, OpenCvMat hueHist, Scalar meanLab, double aspectRatio, Vec3b[] fingerprint, int maxSaturation, double[] huMoments, OpenCvMat chromaHist, double[] spatialColorGrid)
     {
         ImageBgr = imageBgr;
         ImageGray = imageGray;
@@ -40,6 +46,7 @@ internal sealed class PreparedCrop : IDisposable
         MaxSaturation = maxSaturation;
         HuMoments = huMoments;
         ChromaHist = chromaHist;
+        SpatialColorGrid = spatialColorGrid;
     }
 
     public void Dispose()
@@ -65,6 +72,10 @@ public sealed class ItemMatcher
     private PreparedCrop[] _templatePrepared = Array.Empty<PreparedCrop>();
     private IReadOnlyList<SidebarItem> _templates = Array.Empty<SidebarItem>();
     private int[]? _previousLabels;
+    // Phase 3: cluster IDs the event tracker has locked to a specific item NAME via
+    // count-correlation ground truth. LabelClusters applies these locks before bipartite
+    // assignment, overriding any visual scoring. Set by SetLearnedLabels each frame.
+    private Dictionary<int, string> _learnedClusterToItemName = new();
     // Per-cluster-ID memory: clusterId → previously assigned template index. Survives
     // cluster count changes (unlike the array-indexed _previousLabels). Used for hysteresis
     // so labels don't flip when scores fluctuate slightly within stable-board noise.
@@ -75,19 +86,42 @@ public sealed class ItemMatcher
     // flip a cell between sub-clusters.
     private int[]? _previousSplitIds;
     private int[]? _previousInputClusterIds;
-    private const double HysteresisMargin = 0.10;
+    // Margin used to keep a previously-assigned label when its current score is within
+    // this of the new best. 0.10 worked for the old (hue+chroma+ncc+aspect) feature set,
+    // but Phase 2's spatial-color feature has higher per-frame variance from pulse-
+    // induced lighting drift, so this needs to be larger to avoid label flicker.
+    private const double HysteresisMargin = 0.20;
 
     public IReadOnlyList<SidebarItem> Templates => _templates;
     public int TemplateCount => _templatePrepared.Length;
 
     /// <summary>
-    /// Drop the split-cache so the next SplitMixedClusters call re-evaluates from scratch.
-    /// Used by the Settings "Recompute clusters" button alongside CellClusterer.Reset().
+    /// Last successful labeler invocation's diagnostic snapshot. Populated at the end of
+    /// LabelClusters so external tools (Labeler Debug UI) can inspect per-cluster scores
+    /// and confidence without re-running the labeler.
+    /// </summary>
+    public LabelDiagnostics? LastLabelDiagnostics { get; private set; }
+
+    /// <summary>
+    /// Drop the split-cache + learned event-tracker locks so the next call re-evaluates
+    /// from scratch. Used by the Settings "Recompute clusters" button alongside
+    /// CellClusterer.Reset().
     /// </summary>
     public void Reset()
     {
         _previousSplitIds = null;
         _previousInputClusterIds = null;
+        _learnedClusterToItemName.Clear();
+        _lastLabelByClusterId.Clear();
+    }
+
+    /// <summary>
+    /// Push the latest ground-truth cluster→item-name mappings from the event tracker.
+    /// LabelClusters applies these as hard locks before visual scoring.
+    /// </summary>
+    public void SetLearnedLabels(IReadOnlyDictionary<int, string> learned)
+    {
+        _learnedClusterToItemName = new Dictionary<int, string>(learned);
     }
 
     public void SetTemplates(IReadOnlyList<SidebarItem> templates)
@@ -278,13 +312,16 @@ public sealed class ItemMatcher
         int clusterCount = maxClusterId + 1;
 
         double[,] sumScores = new double[clusterCount, _templatePrepared.Length];
-        // Per-feature accumulators for diagnostic logging.
+        // Per-feature accumulators for diagnostic logging. NCC + aspect dropped from the
+        // weighted sum (Phase 2) but still computed for the debug log so we can compare
+        // their values to the dominant features.
         double[,] sumHue = new double[clusterCount, _templatePrepared.Length];
         double[,] sumLab = new double[clusterCount, _templatePrepared.Length];
         double[,] sumNcc = new double[clusterCount, _templatePrepared.Length];
         double[,] sumAspect = new double[clusterCount, _templatePrepared.Length];
         double[,] sumHu = new double[clusterCount, _templatePrepared.Length];
         double[,] sumChroma = new double[clusterCount, _templatePrepared.Length];
+        double[,] sumSpatial = new double[clusterCount, _templatePrepared.Length];
         int[] cellsPerCluster = new int[clusterCount];
 
         for (int i = 0; i < cells.Count; i++)
@@ -301,15 +338,20 @@ public sealed class ItemMatcher
                 double aspect = AspectRatioScore(cellPrepared, _templatePrepared[t]);
                 double hu = HuMomentScore(cellPrepared, _templatePrepared[t]);
                 double chroma = ChromaHistScore(cellPrepared, _templatePrepared[t]);
-                // Chroma histogram replaces mean-LAB's role as the primary color feature.
-                // It captures color DISTRIBUTION (multi-color icons separate cleanly).
-                sumScores[cid, t] += 0.20 * hue + 0.10 * lab + 0.10 * ncc + 0.10 * aspect + 0.0 * hu + 0.50 * chroma;
+                double spatial = SpatialColorScore(cellPrepared, _templatePrepared[t]);
+                // Phase 2 weighting:
+                //   hue 0.15  +  lab 0.05  +  chroma 0.30  +  spatialColor 0.50  = 1.00
+                // NCC + aspect ratio dropped (most domain-gap-sensitive features —
+                // pixel-level correlation and bbox shape mismatch between sidebar's
+                // tightly-cropped icon and board's pulse-jittered cell).
+                sumScores[cid, t] += 0.15 * hue + 0.05 * lab + 0.30 * chroma + 0.50 * spatial;
                 sumHue[cid, t] += hue;
                 sumLab[cid, t] += lab;
                 sumNcc[cid, t] += ncc;
                 sumAspect[cid, t] += aspect;
                 sumHu[cid, t] += hu;
                 sumChroma[cid, t] += chroma;
+                sumSpatial[cid, t] += spatial;
             }
         }
 
@@ -334,27 +376,50 @@ public sealed class ItemMatcher
             if (cellsPerCluster[c] == 0) clusterTaken[c] = true;
         }
 
+        // Phase 3: apply ground-truth locks from the event tracker FIRST. These come
+        // from cross-frame count correlation (item X went up by N, cluster Y dropped
+        // N cells → Y is X) and beat any visual scoring.
+        foreach (KeyValuePair<int, string> learned in _learnedClusterToItemName)
+        {
+            int c = learned.Key;
+            if (c < 0 || c >= clusterCount) continue;
+            if (cellsPerCluster[c] == 0) continue;
+            if (clusterTaken[c]) continue;
+            // Resolve item name → template index.
+            int t = -1;
+            for (int i = 0; i < _templates.Count; i++)
+            {
+                if (_templates[i].Name == learned.Value) { t = i; break; }
+            }
+            if (t < 0 || templateTaken[t]) continue;
+            labels[c] = t;
+            clusterTaken[c] = true;
+            templateTaken[t] = true;
+        }
+
         // Hysteresis: if the previous frame's label for this cluster scores within
         // HysteresisMargin of the current best, keep the previous label. Avoids flicker
         // between near-tied templates frame to frame.
-        if (_previousLabels is not null && _previousLabels.Length == clusterCount)
+        //
+        // Indexed by Dictionary<clusterId,templateIdx> (not array-by-index) so cluster
+        // count changes — common when the splitter adds/removes a sub-cluster — don't
+        // wipe the entire memory. Each cluster remembers its own last-known label even
+        // if the cluster set's cardinality shifts.
+        for (int c = 0; c < clusterCount; c++)
         {
-            for (int c = 0; c < clusterCount; c++)
+            if (cellsPerCluster[c] == 0) continue;
+            if (!_lastLabelByClusterId.TryGetValue(c, out int prev)) continue;
+            if (prev < 0 || prev >= _templatePrepared.Length) continue;
+            if (templateTaken[prev]) continue;   // another cluster already locked it via hysteresis
+            double prevScore = avgScores[c, prev];
+            double bestScore = double.NegativeInfinity;
+            for (int t = 0; t < _templatePrepared.Length; t++)
+                if (avgScores[c, t] > bestScore) bestScore = avgScores[c, t];
+            if (bestScore - prevScore < HysteresisMargin)
             {
-                if (cellsPerCluster[c] == 0) continue;
-                int prev = _previousLabels[c];
-                if (prev < 0 || prev >= _templatePrepared.Length) continue;
-                // If the previously assigned template still scores close to current best, keep it.
-                double prevScore = avgScores[c, prev];
-                double bestScore = double.NegativeInfinity;
-                for (int t = 0; t < _templatePrepared.Length; t++)
-                    if (avgScores[c, t] > bestScore) bestScore = avgScores[c, t];
-                if (bestScore - prevScore < HysteresisMargin)
-                {
-                    labels[c] = prev;
-                    clusterTaken[c] = true;
-                    templateTaken[prev] = true;
-                }
+                labels[c] = prev;
+                clusterTaken[c] = true;
+                templateTaken[prev] = true;
             }
         }
 
@@ -413,6 +478,34 @@ public sealed class ItemMatcher
         }
 
         _previousLabels = (int[])labels.Clone();
+        // Persist per-cluster-ID hysteresis state so it survives cluster count changes
+        // (splitter-induced fragmentation/merge between frames).
+        for (int c = 0; c < clusterCount; c++)
+        {
+            if (cellsPerCluster[c] == 0) continue;
+            if (labels[c] >= 0) _lastLabelByClusterId[c] = labels[c];
+        }
+        // Set of cluster IDs whose label came from a Phase-3 ground-truth lock vs visual
+        // matching. Surfaced in LabelDiagnostics so the debug UI can flag them.
+        HashSet<int> lockedClusterIds = new();
+        foreach (int cid in _learnedClusterToItemName.Keys)
+        {
+            if (cid >= 0 && cid < clusterCount && cellsPerCluster[cid] > 0)
+            {
+                lockedClusterIds.Add(cid);
+            }
+        }
+        // Snapshot for the LabelerDebug UI. Copy avgScores into a flat array so the
+        // consumer doesn't need to know the 2D matrix's shape (templates added/removed
+        // would otherwise break shared layout).
+        LastLabelDiagnostics = new LabelDiagnostics(
+            (int[])labels.Clone(),
+            (int[])cellsPerCluster.Clone(),
+            FlattenAvgScores(avgScores, clusterCount, _templatePrepared.Length),
+            clusterCount,
+            _templatePrepared.Length,
+            _templates.Select(t => t.Name).ToArray(),
+            lockedClusterIds);
 
         // Only dump diagnostic log when labels actually changed (or first time). Otherwise the
         // file IO every frame adds latency to swap recommendations.
@@ -425,7 +518,7 @@ public sealed class ItemMatcher
         try
         {
             System.Text.StringBuilder lb = new();
-            lb.AppendLine($"-- labeler dump @ {DateTime.Now:HH:mm:ss.fff}: {clusterCount} clusters, {_templatePrepared.Length} templates (weights: hue 0.20, lab 0.10, ncc 0.10, aspect 0.10, hu 0.0, chroma 0.50) --");
+            lb.AppendLine($"-- labeler dump @ {DateTime.Now:HH:mm:ss.fff}: {clusterCount} clusters, {_templatePrepared.Length} templates (weights: hue 0.15, lab 0.05, chroma 0.30, spatial 0.50 — ncc/aspect/hu OFF) --");
             for (int c = 0; c < clusterCount; c++)
             {
                 if (cellsPerCluster[c] == 0) { lb.AppendLine($"cluster {c}: 0 cells (unused)"); continue; }
@@ -443,17 +536,22 @@ public sealed class ItemMatcher
                 lb.Append("  lab=[");
                 for (int t = 0; t < _templatePrepared.Length; t++) { lb.Append((sumLab[c, t] / cnt).ToString("F2")); if (t + 1 < _templatePrepared.Length) lb.Append(", "); }
                 lb.AppendLine("]");
-                lb.Append("  ncc=[");
-                for (int t = 0; t < _templatePrepared.Length; t++) { lb.Append((sumNcc[c, t] / cnt).ToString("F2")); if (t + 1 < _templatePrepared.Length) lb.Append(", "); }
-                lb.AppendLine("]");
-                lb.Append("  asp=[");
-                for (int t = 0; t < _templatePrepared.Length; t++) { lb.Append((sumAspect[c, t] / cnt).ToString("F2")); if (t + 1 < _templatePrepared.Length) lb.Append(", "); }
-                lb.AppendLine("]");
-                lb.Append("  hu =[");
-                for (int t = 0; t < _templatePrepared.Length; t++) { lb.Append((sumHu[c, t] / cnt).ToString("F2")); if (t + 1 < _templatePrepared.Length) lb.Append(", "); }
-                lb.AppendLine("]");
                 lb.Append("  chr=[");
                 for (int t = 0; t < _templatePrepared.Length; t++) { lb.Append((sumChroma[c, t] / cnt).ToString("F2")); if (t + 1 < _templatePrepared.Length) lb.Append(", "); }
+                lb.AppendLine("]");
+                lb.Append("  spc=[");
+                for (int t = 0; t < _templatePrepared.Length; t++) { lb.Append((sumSpatial[c, t] / cnt).ToString("F2")); if (t + 1 < _templatePrepared.Length) lb.Append(", "); }
+                lb.AppendLine("]");
+                // The retired features stay in the log so we can spot if/when they
+                // would have helped (or hurt) — useful for future tuning.
+                lb.Append("  (off) ncc=[");
+                for (int t = 0; t < _templatePrepared.Length; t++) { lb.Append((sumNcc[c, t] / cnt).ToString("F2")); if (t + 1 < _templatePrepared.Length) lb.Append(", "); }
+                lb.AppendLine("]");
+                lb.Append("  (off) asp=[");
+                for (int t = 0; t < _templatePrepared.Length; t++) { lb.Append((sumAspect[c, t] / cnt).ToString("F2")); if (t + 1 < _templatePrepared.Length) lb.Append(", "); }
+                lb.AppendLine("]");
+                lb.Append("  (off) hu =[");
+                for (int t = 0; t < _templatePrepared.Length; t++) { lb.Append((sumHu[c, t] / cnt).ToString("F2")); if (t + 1 < _templatePrepared.Length) lb.Append(", "); }
                 lb.AppendLine("]");
             }
             File.WriteAllText(Path.Combine(Path.GetTempPath(), "pg-loot-master-labeler.log"), lb.ToString());
@@ -565,6 +663,31 @@ public sealed class ItemMatcher
         return Math.Max(0, Cv2.CompareHist(cell.ChromaHist, template.ChromaHist, HistCompMethods.Correl));
     }
 
+    // Spatial color similarity. Compares the 16 region-mean LAB values pairwise and
+    // converts the average L2 distance into a [0, 1] similarity via exp decay.
+    // Catches items that share overall color distribution but differ at specific
+    // spatial positions (e.g. brown-ring vs gray-ring icons with similar red centers).
+    private static double SpatialColorScore(PreparedCrop cell, PreparedCrop template)
+    {
+        double[] a = cell.SpatialColorGrid;
+        double[] b = template.SpatialColorGrid;
+        if (a.Length != b.Length || a.Length == 0) return 0;
+        const int regions = 16;
+        double sumDist = 0;
+        for (int i = 0; i < regions; i++)
+        {
+            int idx = i * 3;
+            // L*/a*/b* — weight chrominance higher than luminance (matches LabColorScore).
+            double dL = a[idx] - b[idx];
+            double dA = a[idx + 1] - b[idx + 1];
+            double dB = a[idx + 2] - b[idx + 2];
+            sumDist += Math.Sqrt(0.5 * dL * dL + 1.5 * dA * dA + 1.5 * dB * dB);
+        }
+        double avgDist = sumDist / regions;
+        // LAB dist ~30 = noticeably different. exp(-d/30): 0 → 1.0, 30 → 0.37, 60 → 0.14.
+        return Math.Exp(-avgDist / 30.0);
+    }
+
     // Hu moments shape similarity. Invariant to translation/scale/rotation.
     // Lower L2 distance between log-Hu vectors → more similar shape.
     private static double HuMomentScore(PreparedCrop cell, PreparedCrop template)
@@ -633,7 +756,7 @@ public sealed class ItemMatcher
         OpenCvMat gray = new(MatchSize, MatchSize, MatType.CV_8UC1, Scalar.All(0));
         OpenCvMat mask = new(MatchSize, MatchSize, MatType.CV_8UC1, Scalar.All(0));
         OpenCvMat hist = new(HueBins, 1, MatType.CV_32FC1, Scalar.All(0));
-        return new PreparedCrop(bgr, gray, mask, hist, new Scalar(0, 0, 0), 1.0, new Vec3b[9], 0, new double[7], new OpenCvMat(16 * 16, 1, MatType.CV_32FC1, Scalar.All(0)));
+        return new PreparedCrop(bgr, gray, mask, hist, new Scalar(0, 0, 0), 1.0, new Vec3b[9], 0, new double[7], new OpenCvMat(16 * 16, 1, MatType.CV_32FC1, Scalar.All(0)), new double[16 * 3]);
     }
 
     private static PreparedCrop TightCropAndPrepare(OpenCvMat crop)
@@ -808,7 +931,37 @@ public sealed class ItemMatcher
             // Leave as zeros.
         }
 
-        return new PreparedCrop(resizedBgr, resizedGray, resizedMask, hueHist, meanLab, aspect, fingerprintEarly, maxSat, huMoments, chromaHist);
+        // 4×4 spatial grid of mean LAB values. For each 12×12 sub-region of the 48×48
+        // prepared image, compute the mean LAB over foreground-mask pixels. If a region
+        // has no foreground pixels (icon doesn't occupy that corner), fall back to the
+        // icon's overall mean LAB so the comparison degrades gracefully instead of
+        // hard-zeroing.
+        double[] spatialColorGrid = new double[16 * 3];
+        try
+        {
+            using OpenCvMat resizedLab = new();
+            Cv2.CvtColor(resizedBgr, resizedLab, ColorConversionCodes.BGR2Lab);
+            const int gridDim = 4;
+            int sub = MatchSize / gridDim;  // 12
+            for (int gy = 0; gy < gridDim; gy++)
+            {
+                for (int gx = 0; gx < gridDim; gx++)
+                {
+                    OpenCvRect r = new(gx * sub, gy * sub, sub, sub);
+                    using OpenCvMat regionLab = new(resizedLab, r);
+                    using OpenCvMat regionMask = new(resizedMask, r);
+                    bool hasForeground = Cv2.CountNonZero(regionMask) > 0;
+                    Scalar mean = hasForeground ? Cv2.Mean(regionLab, regionMask) : meanLab;
+                    int idx = (gy * gridDim + gx) * 3;
+                    spatialColorGrid[idx + 0] = mean.Val0;
+                    spatialColorGrid[idx + 1] = mean.Val1;
+                    spatialColorGrid[idx + 2] = mean.Val2;
+                }
+            }
+        }
+        catch { /* leave at zeros */ }
+
+        return new PreparedCrop(resizedBgr, resizedGray, resizedMask, hueHist, meanLab, aspect, fingerprintEarly, maxSat, huMoments, chromaHist, spatialColorGrid);
     }
 
     private static OpenCvRect ClampRect(OpenCvRect r, int width, int height)
@@ -818,5 +971,72 @@ public sealed class ItemMatcher
         int w = Math.Min(r.Width, width - x);
         int h = Math.Min(r.Height, height - y);
         return new OpenCvRect(x, y, w, h);
+    }
+
+    private static double[] FlattenAvgScores(double[,] avgScores, int rows, int cols)
+    {
+        double[] flat = new double[rows * cols];
+        for (int r = 0; r < rows; r++)
+            for (int c = 0; c < cols; c++)
+                flat[r * cols + c] = avgScores[r, c];
+        return flat;
+    }
+}
+
+/// <summary>
+/// Per-frame diagnostic snapshot from LabelClusters. Lets the LabelerDebug UI display
+/// cluster→template assignments, per-cluster confidence (best vs runner-up), and the
+/// full score matrix for advanced inspection.
+/// </summary>
+public sealed class LabelDiagnostics
+{
+    public int[] Labels { get; }                 // labels[cluster] = template index (or -1)
+    public int[] CellsPerCluster { get; }        // count of cells per cluster
+    public double[] AvgScoresFlat { get; }       // [cluster * TemplateCount + template]
+    public int ClusterCount { get; }
+    public int TemplateCount { get; }
+    public string[] TemplateNames { get; }       // sidebar item names, in template index order
+    public HashSet<int> LockedClusterIds { get; } // clusters whose label came from a Phase-3 ground-truth event lock
+
+    public LabelDiagnostics(int[] labels, int[] cellsPerCluster, double[] avgScoresFlat,
+        int clusterCount, int templateCount, string[] templateNames,
+        HashSet<int>? lockedClusterIds = null)
+    {
+        Labels = labels;
+        CellsPerCluster = cellsPerCluster;
+        AvgScoresFlat = avgScoresFlat;
+        ClusterCount = clusterCount;
+        TemplateCount = templateCount;
+        TemplateNames = templateNames;
+        LockedClusterIds = lockedClusterIds ?? new HashSet<int>();
+    }
+
+    public bool IsLocked(int cluster) => LockedClusterIds.Contains(cluster);
+
+    public double AvgScore(int cluster, int template) =>
+        AvgScoresFlat[cluster * TemplateCount + template];
+
+    /// <summary>Best score minus runner-up for this cluster. Higher = more confident.</summary>
+    public double Confidence(int cluster)
+    {
+        double best = double.NegativeInfinity, runnerUp = double.NegativeInfinity;
+        for (int t = 0; t < TemplateCount; t++)
+        {
+            double s = AvgScore(cluster, t);
+            if (s > best) { runnerUp = best; best = s; }
+            else if (s > runnerUp) runnerUp = s;
+        }
+        return best - runnerUp;
+    }
+
+    public double BestScore(int cluster)
+    {
+        double best = double.NegativeInfinity;
+        for (int t = 0; t < TemplateCount; t++)
+        {
+            double s = AvgScore(cluster, t);
+            if (s > best) best = s;
+        }
+        return best;
     }
 }

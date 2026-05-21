@@ -60,6 +60,7 @@ public partial class OverlayWindow : Window
     private readonly CellClusterer _cellClusterer = new();
     private readonly SidebarReader _sidebarReader = new();
     private readonly ItemMatcher _itemMatcher = new();
+    private readonly LabelerEventTracker _labelerEventTracker = new();
     private readonly GameTracker _gameTracker = new();
     private readonly GameHistoryStore _historyStore = GameHistoryStore.Load();
     public GameHistoryStore HistoryStore => _historyStore;
@@ -71,6 +72,10 @@ public partial class OverlayWindow : Window
     // Set by App.OnStartup so the overlay can push live-comparison snapshots to the toolbar
     // without holding a direct reference to ToolbarWindow. Null = no active game / no history.
     public Action<LiveComparisonSnapshot?>? OnLiveComparisonChanged { get; set; }
+    // Set by the LabelerDebugWindow while it's open so the overlay knows to FORCE
+    // LabelClusters to run every frame (normally only Target Hunter runs the labeler).
+    // The callback receives the latest diagnostics snapshot or null when labeler didn't run.
+    public Action<PgLootMaster.Vision.LabelDiagnostics?>? OnLabelerDiagnosticsChanged { get; set; }
     private int _lastSidebarSignature;
     private static readonly System.Windows.Media.Color[] ClusterColors = new[]
     {
@@ -143,7 +148,8 @@ public partial class OverlayWindow : Window
         {
             _cellClusterer.Reset();
             _itemMatcher.Reset();
-            OverlayLog.Write("User-requested cluster recompute — clusterer + matcher reset");
+            _labelerEventTracker.ResetForNewGame();
+            OverlayLog.Write("User-requested cluster recompute — clusterer + matcher + event tracker reset");
         };
 
 
@@ -212,10 +218,14 @@ public partial class OverlayWindow : Window
                     if (cells.Count == BoardExtractor.GridDim * BoardExtractor.GridDim)
                     {
                         long tBeforeCluster = sw.ElapsedMilliseconds;
-                        // Borders are keyed by the cell clusterer (proven to give unique IDs per
-                        // visually-distinct item). The ItemMatcher only labels each cluster with
-                        // a sidebar item name for display — if its label is wrong, the borders
-                        // still correctly separate distinct items.
+                        // Tell the clusterer the target cluster count from sidebar items.
+                        // When the greedy clustering ends up with fewer clusters than this
+                        // (= two visually-distinct items merged into one cluster), the
+                        // canonical-capture force-splits via k-means-2 until count matches
+                        // or remaining clusters are genuinely uniform.
+                        _cellClusterer.TargetMinClusterCount = _latestSidebarItems.Count > 0
+                            ? _latestSidebarItems.Count
+                            : null;
                         _latestClusterIds = _cellClusterer.ClusterCells(bgrFrame, cells);
                         tCluster = sw.ElapsedMilliseconds - tBeforeCluster;
                         if (_latestSidebarItems.Count > 0)
@@ -239,12 +249,27 @@ public partial class OverlayWindow : Window
                             tSplit = sw.ElapsedMilliseconds - tBeforeSplit;
                             // LabelClusters (cluster→item-name matching) is unreliable, so we
                             // ONLY run it when the user has opted in via the Target Hunter
-                            // strategy. Other strategies don't need cluster→template mapping.
-                            if (OverlaySettings.Instance.SolverStrategy == (int)SolverStrategy.TargetHunter)
+                            // strategy OR has the LabelerDebug window open (to measure
+                            // accuracy). Other paths skip it to save CPU.
+                            bool labelerDebugOpen = OnLabelerDiagnosticsChanged is not null;
+                            if (OverlaySettings.Instance.SolverStrategy == (int)SolverStrategy.TargetHunter
+                                || labelerDebugOpen)
                             {
+                                // Phase 3 event-based learning: feed the tracker with the
+                                // latest sidebar + cluster state, then push any learned
+                                // ground-truth mappings into the matcher BEFORE the visual
+                                // labeling pass so they get applied as hard locks.
+                                _labelerEventTracker.OnFrame(_latestSidebarItems, _latestClusterIds);
+                                _itemMatcher.SetLearnedLabels(_labelerEventTracker.Learned);
+
                                 long tBeforeLabel = sw.ElapsedMilliseconds;
                                 _latestClusterToTemplate = _itemMatcher.LabelClusters(bgrFrame, cells, _latestClusterIds);
                                 tLabel = sw.ElapsedMilliseconds - tBeforeLabel;
+                                if (labelerDebugOpen)
+                                {
+                                    PgLootMaster.Vision.LabelDiagnostics? diag = _itemMatcher.LastLabelDiagnostics;
+                                    Dispatcher.BeginInvoke(() => OnLabelerDiagnosticsChanged?.Invoke(diag));
+                                }
                             }
                             else
                             {
@@ -304,6 +329,12 @@ public partial class OverlayWindow : Window
                 // Reset SidebarReader's monotonic floors so the next game's Score=0 / TurnsMade=0
                 // reads aren't rejected as "backward jumps" from the previous game's finals.
                 _sidebarReader.ResetForNewGame();
+                // Clear Phase-3 learned mappings — cluster IDs in the next game don't
+                // correspond to the same items.
+                _labelerEventTracker.ResetForNewGame();
+                // Drop the canonical cluster set — the next game has a different item
+                // roster, so it must be re-captured fresh after warmup.
+                _cellClusterer.Reset();
             }
         }
         _latestCells = cells;

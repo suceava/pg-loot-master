@@ -1,0 +1,94 @@
+<Window x:Class="PgLootMaster.LabelerDebugWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="PG Loot Master — Labeler Debug"
+        WindowStyle="ToolWindow"
+        Topmost="True"
+        ShowInTaskbar="False"
+        Width="820"
+        Height="560"
+        WindowStartupLocation="CenterOwner"
+        Background="#FF1E1E1E"
+        Foreground="White"
+        FontFamily="Consolas"
+        Focusable="True"
+        KeyDown="OnWindowKeyDown">
+    <Window.Resources>
+        <Style x:Key="DarkHeaderStyle" TargetType="DataGridColumnHeader">
+            <Setter Property="Background" Value="#FF202020" />
+            <Setter Property="Foreground" Value="#FF20FF20" />
+            <Setter Property="FontWeight" Value="Bold" />
+            <Setter Property="Padding" Value="8,6" />
+            <Setter Property="BorderBrush" Value="#FF333333" />
+            <Setter Property="BorderThickness" Value="0,0,1,1" />
+            <Setter Property="HorizontalContentAlignment" Value="Left" />
+        </Style>
+    </Window.Resources>
+    <DockPanel Margin="16">
+        <StackPanel DockPanel.Dock="Top" Margin="0,0,0,8">
+            <TextBlock Text="LABELER DEBUG"
+                       FontSize="11"
+                       FontWeight="Bold"
+                       Foreground="#FF20FF20" />
+            <Border BorderBrush="#FF20FF20"
+                    BorderThickness="0,0,0,1"
+                    Margin="0,4,0,8" />
+            <TextBlock Foreground="#FFAAAAAA"
+                       FontSize="11"
+                       TextWrapping="Wrap">
+                Select a cluster row, then press <Run FontWeight="Bold" Foreground="#FF60E060">Y</Run> if the assigned label is correct,
+                <Run FontWeight="Bold" Foreground="#FFFF6060">N</Run> if it's wrong, or
+                <Run FontWeight="Bold" Foreground="White">S</Run> to skip.
+                Enable <Run FontWeight="Bold">Show board overlay</Run> in Settings to see cluster colors on the board.
+            </TextBlock>
+        </StackPanel>
+
+        <Border DockPanel.Dock="Bottom"
+                Background="#FF2A2A2A"
+                Padding="8,6"
+                Margin="0,8,0,0"
+                CornerRadius="3">
+            <TextBlock x:Name="StatsText"
+                       Foreground="White"
+                       FontSize="11"
+                       TextWrapping="Wrap"
+                       Text="(no annotations yet)" />
+        </Border>
+
+        <DataGrid x:Name="ClustersGrid"
+                  AutoGenerateColumns="False"
+                  Background="#FF2A2A2A"
+                  Foreground="White"
+                  RowBackground="#FF2A2A2A"
+                  AlternatingRowBackground="#FF303030"
+                  GridLinesVisibility="Horizontal"
+                  HorizontalGridLinesBrush="#FF333333"
+                  HeadersVisibility="Column"
+                  CanUserAddRows="False"
+                  CanUserDeleteRows="False"
+                  CanUserReorderColumns="False"
+                  IsReadOnly="True"
+                  SelectionMode="Single"
+                  ColumnHeaderStyle="{StaticResource DarkHeaderStyle}">
+            <DataGrid.Columns>
+                <DataGridTemplateColumn Header="" Width="36">
+                    <DataGridTemplateColumn.CellTemplate>
+                        <DataTemplate>
+                            <Border Background="{Binding ColorBrush}"
+                                    Width="18" Height="18"
+                                    CornerRadius="3"
+                                    Margin="6,0" />
+                        </DataTemplate>
+                    </DataGridTemplateColumn.CellTemplate>
+                </DataGridTemplateColumn>
+                <DataGridTextColumn Header="Cluster" Binding="{Binding ClusterId}" Width="70" />
+                <DataGridTextColumn Header="Cells"   Binding="{Binding CellCount}" Width="60" />
+                <DataGridTextColumn Header="Assigned label" Binding="{Binding AssignedLabel}" Width="190" />
+                <DataGridTextColumn Header="Score"  Binding="{Binding BestScoreText}" Width="80" />
+                <DataGridTextColumn Header="Confidence" Binding="{Binding ConfidenceText}" Width="100" />
+                <DataGridTextColumn Header="Annotation" Binding="{Binding AnnotationText}" Width="120" />
+                <DataGridTextColumn Header="Runner-up" Binding="{Binding RunnerUpText}" Width="180" />
+            </DataGrid.Columns>
+        </DataGrid>
+    </DockPanel>
+</Window>

@@ -11,8 +11,15 @@ public partial class ToolbarWindow : Window
 {
     private SettingsWindow? _settingsWindow;
     private HistoryWindow? _historyWindow;
-    private bool _suppressTargetChanged;
+    private LabelerDebugWindow? _labelerDebugWindow;
     private readonly GameHistoryStore _historyStore;
+    // Set by App.OnStartup so the toolbar can wire the LabelerDebug window's lifecycle
+    // (open / close → toggling the overlay's OnLabelerDiagnosticsChanged callback).
+    public OverlayWindow? Overlay { get; set; }
+    // Latest sidebar items snapshot, pushed by the OverlayWindow each frame the item set
+    // changes. Cached here so we can hand it to the SettingsWindow on open — the target
+    // dropdown lives there now (under the Solver section, only when Target Hunter active).
+    private IReadOnlyList<SidebarItem> _latestSidebarItems = System.Array.Empty<SidebarItem>();
 
     public ToolbarWindow(GameHistoryStore historyStore)
     {
@@ -20,9 +27,6 @@ public partial class ToolbarWindow : Window
         _historyStore = historyStore;
         Left = OverlaySettings.Instance.ToolbarLeft;
         Top = OverlaySettings.Instance.ToolbarTop;
-        // Start with just the placeholder; the OverlayWindow will push updates as sidebar
-        // items get detected.
-        RefreshTargetList(System.Array.Empty<SidebarItem>());
         RefreshStrategyChip();
         OverlaySettings.Instance.PropertyChanged += (_, args) =>
         {
@@ -42,11 +46,6 @@ public partial class ToolbarWindow : Window
             3 => "TARGET HUNTER",
             _ => "?",
         };
-        // Target selector is only relevant for the Target Hunter strategy. Hidden for
-        // every other strategy so users don't see the (unreliable) labeler dropdown.
-        Visibility targetVis = strategy == 3 ? Visibility.Visible : Visibility.Collapsed;
-        TargetLabel.Visibility = targetVis;
-        TargetComboBox.Visibility = targetVis;
     }
 
     private static readonly Brush AheadBrush = new SolidColorBrush(Color.FromRgb(100, 240, 100));
@@ -144,44 +143,16 @@ public partial class ToolbarWindow : Window
     }
 
     /// <summary>
-    /// Refreshes the target dropdown with the current uncaptured sidebar items.
-    /// Preserves the selected target by name across calls (cluster IDs shift each round).
-    /// Call from the overlay's frame pipeline whenever the sidebar items list changes.
+    /// Called by the OverlayWindow whenever the sidebar item set changes. Cached so the
+    /// SettingsWindow's target dropdown can populate on open. If the SettingsWindow is
+    /// currently open, push the update straight to it too.
     /// </summary>
     public void RefreshTargetList(System.Collections.Generic.IReadOnlyList<SidebarItem> items)
     {
-        _suppressTargetChanged = true;
-        try
+        _latestSidebarItems = items;
+        if (_settingsWindow is not null && _settingsWindow.IsLoaded)
         {
-            string? currentTarget = OverlaySettings.Instance.TargetItemName;
-            TargetComboBox.Items.Clear();
-            TargetComboBox.Items.Add("(no target)");
-            int selectIndex = 0;
-            foreach (SidebarItem it in items)
-            {
-                if (it.Captured) continue;
-                if (string.IsNullOrEmpty(it.Name)) continue;
-                int idx = TargetComboBox.Items.Add(it.Name);
-                if (it.Name == currentTarget) selectIndex = idx;
-            }
-            TargetComboBox.SelectedIndex = selectIndex;
-        }
-        finally
-        {
-            _suppressTargetChanged = false;
-        }
-    }
-
-    private void OnTargetChanged(object sender, SelectionChangedEventArgs e)
-    {
-        if (_suppressTargetChanged) return;
-        if (TargetComboBox.SelectedIndex <= 0)
-        {
-            OverlaySettings.Instance.TargetItemName = null;
-        }
-        else
-        {
-            OverlaySettings.Instance.TargetItemName = TargetComboBox.SelectedItem?.ToString();
+            _settingsWindow.RefreshTargetList(items);
         }
     }
 
@@ -199,7 +170,7 @@ public partial class ToolbarWindow : Window
     {
         if (_settingsWindow is null || !_settingsWindow.IsLoaded)
         {
-            _settingsWindow = new SettingsWindow { Owner = this };
+            _settingsWindow = new SettingsWindow(_latestSidebarItems) { Owner = this };
             _settingsWindow.Closed += (_, _) => _settingsWindow = null;
             _settingsWindow.Show();
         }
@@ -220,6 +191,38 @@ public partial class ToolbarWindow : Window
         else
         {
             _historyWindow.Activate();
+        }
+    }
+
+    private void OnLabelerDebugClick(object sender, RoutedEventArgs e)
+    {
+        if (_labelerDebugWindow is null || !_labelerDebugWindow.IsLoaded)
+        {
+            _labelerDebugWindow = new LabelerDebugWindow { Owner = this };
+            // Hook the overlay's labeler-diagnostics push → debug window. Setting the
+            // callback ALSO triggers the overlay to force LabelClusters to run every
+            // frame (the overlay reads "callback non-null" as "debug is open").
+            if (Overlay is not null)
+            {
+                Overlay.OnLabelerDiagnosticsChanged = diag =>
+                {
+                    if (_labelerDebugWindow is not null && _labelerDebugWindow.IsLoaded)
+                    {
+                        _labelerDebugWindow.Update(diag);
+                    }
+                };
+            }
+            _labelerDebugWindow.Closed += (_, _) =>
+            {
+                _labelerDebugWindow = null;
+                // Drop the callback → overlay stops forcing LabelClusters.
+                if (Overlay is not null) Overlay.OnLabelerDiagnosticsChanged = null;
+            };
+            _labelerDebugWindow.Show();
+        }
+        else
+        {
+            _labelerDebugWindow.Activate();
         }
     }
 

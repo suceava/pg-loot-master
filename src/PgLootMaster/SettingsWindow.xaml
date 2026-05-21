@@ -41,6 +41,21 @@
                    Width="320"
                    Margin="0,6,0,0" />
 
+        <!-- Target panel — only visible when Target Hunter strategy is selected. -->
+        <StackPanel x:Name="TargetPanel"
+                    Margin="0,12,0,0"
+                    Visibility="Collapsed">
+            <TextBlock Text="Target item:"
+                       Foreground="White"
+                       Margin="0,0,0,4" />
+            <ComboBox x:Name="TargetComboBox"
+                      Width="320"
+                      Height="26"
+                      FontSize="12"
+                      HorizontalAlignment="Left"
+                      SelectionChanged="OnTargetChanged" />
+        </StackPanel>
+
         <TextBlock Text="DEBUG"
                    FontSize="11"
                    FontWeight="Bold"
