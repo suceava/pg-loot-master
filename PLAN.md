@@ -1,5 +1,10 @@
 # PG Loot Master — Match-3 Solver Overlay
 
+> **Historical document.** This is the original pre-build plan. Its architecture and its
+> stated goal ("maximise net councils") are outdated. The game rules and the tool's
+> current goal live in [GAME_RULES.md](GAME_RULES.md) — that is the living reference;
+> this file is not maintained.
+
 ## Context
 
 Project: Gorgon contains a Bejeweled-style minigame ("Loot Master Match-3", with a Deluxe variant) on NPC vendor interactions. A game costs councils up front (450 standard, 800 Deluxe), the player gets N turns to chain matches, and the goal is to maximize net councils via raw score + items "captured" when their match count crosses a per-item threshold.

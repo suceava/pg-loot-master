@@ -49,6 +49,8 @@ The tool only reads pixels from the PG window (via Windows Graphics Capture). It
 
 For working on the code itself.
 
+**Game rules & the solver's goal** live in [GAME_RULES.md](GAME_RULES.md) — the living reference for how Loot Master works and what the tool optimises for. Read it before touching the solver.
+
 ## Stack
 
 .NET 8 + WPF + C#, Windows-only. Windows.Graphics.Capture for screen capture, OpenCvSharp4 for board recognition, OxyPlot.Wpf for charts.
