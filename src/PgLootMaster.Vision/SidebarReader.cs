@@ -9,6 +9,9 @@ public sealed class SidebarItem
     public int Index { get; }
     public OpenCvMat Icon { get; }
     public OpenCvRect FrameRect { get; }
+    // Frame-Y centre of the row's bar (the regularised even-grid centre, not the
+    // jittery icon-artwork centre). The count number / checkmark sit on this line.
+    public int RowCenterY { get; set; }
     public string Name { get; set; } = string.Empty;
     // Count of matches captured so far for this item, parsed from the trailing number in the
     // OCR'd row (e.g. "Pixie Sugar 12" → CaptureCount=12). Null if no count was found
@@ -53,17 +56,27 @@ public sealed class SidebarReader
     private const double IconCropMargin = 1.15;
     private const int IconFallbackCenterFromSidebar = 20;
     private const int IconFallbackHalfSize = 46;
-    // Item rows are read from the OCR'd item NAMES. A name line is OCR text below
-    // ItemAreaTopInSidebar (the header sits above) and left of ItemNameMaxXInSidebar
-    // (the capture-count numbers sit right of that). OCR lines closer than
-    // RowGroupMaxGap belong to the same row — a wrapped two-line name. Rows step by
-    // roughly ExpectedRowStride, used only to gap-fill a row whose name OCR missed.
+    // Item rows are anchored on the icon column: the icon band is scanned for solid
+    // colour blobs (one per row), and a blob run longer than ~1.4x ExpectedRowStride
+    // is split. Name text — below ItemAreaTopInSidebar and left of
+    // CountColumnLeftXInSidebar — is OCR'd and each line assigned to the nearest row.
     private const int ItemAreaTopInSidebar = 380;
-    private const int ItemNameMaxXInSidebar = 255;
-    private const int RowGroupMaxGap = 48;
+    // Left edge of the capture-count column. Counts are left-justified at ~+284, so
+    // this sits just left of them: name text ends to the left, counts / checkmarks to
+    // the right. Kept tight (~4 px clearance) so a long name's tail never lands in the
+    // count region — the widest observed label still ends left of this.
+    private const int CountColumnLeftXInSidebar = 280;
     private const int ExpectedRowStride = 81;
+    // Icon-blob row scan: a row Y counts as "icon" when at least IconRowMinPixels icon
+    // pixels fall in the band [IconBandLeftFromSidebar .. IconRowScanBandRight]; runs
+    // shorter than IconRowMinHeight are noise. The scan stops at IconRowScanBottom —
+    // above the dungeon wall visible below the panel — with room for a 7th row.
+    private const int IconRowScanBandRight = 48;
+    private const int IconRowScanBottom = 960;
+    private const int IconRowMinPixels = 8;
+    private const int IconRowMinHeight = 20;
 
-    private static int _debugDumped;
+    private static int _lastDumpedItemCount = -1;
     private static readonly string DebugDir = Path.Combine(Path.GetTempPath(), "pg-loot-master-sidebar-debug");
 
     private readonly SidebarOcr _ocr = new();
@@ -97,8 +110,8 @@ public sealed class SidebarReader
         Score = null;
         TurnsMade = null;
         TurnsLeft = null;
-        // Re-arm the one-shot debug dump so each new game writes fresh icon crops.
-        _debugDumped = 0;
+        // Re-arm the debug dump so the new game writes fresh icon crops.
+        _lastDumpedItemCount = -1;
     }
 
     private static readonly System.Text.RegularExpressions.Regex GameOverRe = new(
@@ -178,7 +191,10 @@ public sealed class SidebarReader
                         break;
                     }
                 }
-                int? scoreVal = FindValueBesideLabel(sorted, "core", sidebarForOcr);
+                // The sidebar crop clips ~23px off the header labels' left edge, so
+                // "Score:" survives OCR only as "core:" / "c re:". Match the tail "re:"
+                // — unique to Score among the header rows — not "Score"/"core".
+                int? scoreVal = FindValueBesideLabel(sorted, "re:", sidebarForOcr);
                 if (scoreVal is int s && (Score is null || s >= Score)) Score = s;
                 int? turnsMadeVal = FindValueBesideLabel(sorted, "made", sidebarForOcr);
                 if (turnsMadeVal is int tm && (TurnsMade is null || tm >= TurnsMade)) TurnsMade = tm;
@@ -188,77 +204,56 @@ public sealed class SidebarReader
             catch { }
         }
 
-        // --- Item rows from the OCR name lines -----------------------------------
-        // A name line is OCR text below the header and left of the count column. Lines
-        // within RowGroupMaxGap of each other are the same row (a wrapped name like
-        // "Power Potion" / "Extreme"); a larger jump starts a new row.
-        // Track each row group's FIRST and LAST line — the row centre is their true
-        // midpoint. (A running pairwise average over-weights the last line, biasing the
-        // centre low for names that wrap to 3+ lines.)
-        List<(int FirstY, int LastY, string Name)> ocrRows = new();
+        // --- Item rows: anchored on the icon column ------------------------------
+        // Each item row carries exactly ONE icon — a solid colour blob at the left,
+        // evenly spaced, that never wraps. Item NAMES wrap to 1-3 lines and a wrapped
+        // line can land closer to a neighbouring row's centre than to its own, so
+        // grouping OCR'd name lines by Y-gap merged adjacent items. Rows are detected
+        // from the icon blobs; name lines are then assigned to whichever row is nearest.
+        List<int> rowCentersY = DetectIconRowCenters(bgrFrame, sidebarRect);
+
+        // Individual (un-grouped) OCR name lines, with their frame-Y centres.
+        List<(int FrameYCenter, string Text)> nameLines = new();
         foreach (OcrLine line in sorted)
         {
-            if (line.Bbox.Y < ItemAreaTopInSidebar) continue;      // header region
-            if (line.Bbox.X >= ItemNameMaxXInSidebar) continue;    // count column
-            if (!line.Text.Any(char.IsLetter)) continue;           // stray digit
-            int yc = line.Bbox.Y + line.Bbox.Height / 2;
-            if (ocrRows.Count > 0 && yc - ocrRows[^1].LastY <= RowGroupMaxGap)
-            {
-                (int f, int _, string nm) = ocrRows[^1];
-                ocrRows[^1] = (f, yc, nm + " " + line.Text);
-            }
-            else
-            {
-                ocrRows.Add((yc, yc, line.Text));
-            }
-        }
-
-        List<int> rowCentersY = ocrRows
-            .Select(r => sidebarRect.Y + (r.FirstY + r.LastY) / 2).ToList();
-
-        // Gap-fill: a row whose name OCR failed entirely leaves a >1.5x-stride hole.
-        // Insert evenly-spaced centres so the icon is still cropped (icon matching
-        // works without a name).
-        if (rowCentersY.Count >= 2)
-        {
-            List<int> filled = new() { rowCentersY[0] };
-            for (int i = 1; i < rowCentersY.Count; i++)
-            {
-                int gap = rowCentersY[i] - rowCentersY[i - 1];
-                int extras = (int)Math.Round(gap / (double)ExpectedRowStride) - 1;
-                for (int e = 1; e <= extras; e++)
-                    filled.Add(rowCentersY[i - 1] + e * gap / (extras + 1));
-                filled.Add(rowCentersY[i]);
-            }
-            rowCentersY = filled;
+            if (line.Bbox.Y < ItemAreaTopInSidebar) continue;          // header region
+            if (line.Bbox.X >= CountColumnLeftXInSidebar) continue;    // count column
+            if (!line.Text.Any(char.IsLetter)) continue;               // stray digit
+            nameLines.Add((sidebarRect.Y + line.Bbox.Y + line.Bbox.Height / 2, line.Text));
         }
 
         // --- Build an item per detected row --------------------------------------
+        // The row grid's stride shrinks as the list fills up, so the icon search
+        // window is derived from the measured stride — a fixed ±46 px window overlapped
+        // the neighbouring icon once 7 rows packed the sidebar.
+        int rowStride = rowCentersY.Count >= 2
+            ? rowCentersY[1] - rowCentersY[0]
+            : ExpectedRowStride;
+        int iconSearchHalf = Math.Clamp(rowStride / 2, 28, IconSearchHalfHeight);
         List<SidebarItem> items = new();
         for (int i = 0; i < rowCentersY.Count; i++)
         {
             int rowY = rowCentersY[i];
-            OpenCvRect iconRect = DetectIconRect(bgrFrame, sidebarRect, rowY);
+            OpenCvRect iconRect = DetectIconRect(bgrFrame, sidebarRect, rowY, iconSearchHalf);
             if (iconRect.Width < 24 || iconRect.Height < 24) continue;
             OpenCvMat iconCrop = new OpenCvMat(bgrFrame, iconRect).Clone();
-            SidebarItem item = new(items.Count, iconCrop, iconRect);
+            SidebarItem item = new(items.Count, iconCrop, iconRect) { RowCenterY = rowY };
 
-            // Name: the OCR row group whose centre is nearest this row.
-            string name = "";
-            int bestD = ExpectedRowStride / 2;
-            foreach ((int f, int l, string nm) in ocrRows)
-            {
-                int d = Math.Abs((sidebarRect.Y + (f + l) / 2) - rowY);
-                if (d < bestD) { bestD = d; name = nm; }
-            }
+            // Name: every OCR name line whose nearest row is THIS one, top-to-bottom.
+            // Per-line assignment keeps each line of a wrapped name with its own item
+            // even when the 2-3 line block overflows the row bar.
+            string name = string.Join(" ", nameLines
+                .Where(nl => NearestRowIndex(rowCentersY, nl.FrameYCenter) == i)
+                .OrderBy(nl => nl.FrameYCenter)
+                .Select(nl => nl.Text));
 
             // Capture count: a digit OCR line in the count column at this row's Y.
             int? count = null;
             foreach (OcrLine line in sorted)
             {
-                if (line.Bbox.X < ItemNameMaxXInSidebar) continue;
+                if (line.Bbox.X < CountColumnLeftXInSidebar) continue;
                 int lyc = sidebarRect.Y + line.Bbox.Y + line.Bbox.Height / 2;
-                if (Math.Abs(lyc - rowY) > ExpectedRowStride / 2) continue;
+                if (Math.Abs(lyc - rowY) > rowStride / 2) continue;
                 string digits = line.Text.Replace('O', '0').Replace('o', '0').Trim();
                 if (digits.Length > 0 && digits.All(char.IsDigit)
                     && int.TryParse(digits, out int cn))
@@ -314,11 +309,13 @@ public sealed class SidebarReader
 
         BuildNumbersMontage(bgrFrame, sidebarRect, items);
 
-        // One-shot debug dump — but only on a VALID read, so it doesn't freeze a garbage
-        // mid-transition frame (empty names, no icons) as the permanent diagnostic.
+        // Debug dump — refreshed whenever the item count changes (a capture introduced
+        // a new row), and only on a VALID read so a garbage mid-transition frame
+        // (empty names, no icons) is never frozen as the permanent diagnostic.
         bool validRead = items.Count >= 3 && items.Any(it => !string.IsNullOrEmpty(it.Name));
-        if (validRead && Interlocked.Increment(ref _debugDumped) == 1)
+        if (validRead && items.Count != _lastDumpedItemCount)
         {
+            _lastDumpedItemCount = items.Count;
             try
             {
                 Directory.CreateDirectory(DebugDir);
@@ -454,6 +451,83 @@ public sealed class SidebarReader
     }
 
     /// <summary>
+    /// Row centres (frame Y) detected from the icon column. Each item row carries one
+    /// solid colour blob, evenly spaced, that never wraps — a far more reliable anchor
+    /// than grouping OCR'd name lines, which wrap across row boundaries. A blob run
+    /// longer than ~1.4x the stride (two adjacent icons, no brown gap) is split.
+    /// </summary>
+    private static List<int> DetectIconRowCenters(OpenCvMat bgrFrame, OpenCvRect sidebarRect)
+    {
+        List<int> centers = new();
+        int bandL = Math.Max(0, sidebarRect.X + IconBandLeftFromSidebar);
+        int bandR = Math.Min(bgrFrame.Cols - 1, sidebarRect.X + IconRowScanBandRight);
+        int yTop = Math.Max(0, sidebarRect.Y + ItemAreaTopInSidebar);
+        int yBot = Math.Min(bgrFrame.Rows - 1, sidebarRect.Y + IconRowScanBottom);
+        if (bandR - bandL < 20 || yBot - yTop < 40) return centers;
+
+        Mat.Indexer<Vec3b> px = bgrFrame.GetGenericIndexer<Vec3b>();
+        int runStart = -1;
+        for (int y = yTop; y <= yBot; y++)
+        {
+            int cnt = 0;
+            for (int x = bandL; x <= bandR; x++)
+                if (IsIconPixel(px[y, x])) cnt++;
+            bool isIconRow = cnt >= IconRowMinPixels;
+            if (isIconRow && runStart < 0) runStart = y;
+            else if (!isIconRow && runStart >= 0)
+            {
+                AddSegmentRows(centers, 0, runStart, y - 1, IconRowMinHeight, ExpectedRowStride);
+                runStart = -1;
+            }
+        }
+        if (runStart >= 0)
+            AddSegmentRows(centers, 0, runStart, yBot, IconRowMinHeight, ExpectedRowStride);
+        return RegularizeEvenGrid(centers);
+    }
+
+    /// <summary>
+    /// Snap detected row centres onto the best-fit even-spaced grid (least squares).
+    /// An icon's artwork is not perfectly centred in its bar and IsIconPixel catches a
+    /// dark-heavy icon unevenly, so raw centres jitter; the bars are a perfectly regular
+    /// grid whose stride shrinks as more rows are added. Fitting the grid recovers the
+    /// true per-row centre — and the true stride — at any item count.
+    /// </summary>
+    private static List<int> RegularizeEvenGrid(List<int> centers)
+    {
+        int n = centers.Count;
+        if (n < 3) return centers;
+        centers.Sort();
+        double sk = 0, sc = 0, skk = 0, skc = 0;
+        for (int k = 0; k < n; k++)
+        {
+            sk += k; sc += centers[k];
+            skk += (double)k * k; skc += (double)k * centers[k];
+        }
+        double denom = n * skk - sk * sk;
+        if (denom <= 0) return centers;
+        double stride = (n * skc - sk * sc) / denom;
+        double y0 = (sc - stride * sk) / n;
+        if (stride < ExpectedRowStride * 0.55 || stride > ExpectedRowStride * 1.6)
+            return centers;   // implausible fit — keep the raw centres
+        List<int> grid = new(n);
+        for (int k = 0; k < n; k++)
+            grid.Add((int)Math.Round(y0 + k * stride));
+        return grid;
+    }
+
+    /// <summary>Index of the row centre nearest <paramref name="y"/>, or -1 if none.</summary>
+    private static int NearestRowIndex(IReadOnlyList<int> rowCentersY, int y)
+    {
+        int best = -1, bestD = int.MaxValue;
+        for (int i = 0; i < rowCentersY.Count; i++)
+        {
+            int d = Math.Abs(rowCentersY[i] - y);
+            if (d < bestD) { bestD = d; best = i; }
+        }
+        return best;
+    }
+
+    /// <summary>
     /// Find one sidebar item's icon and return a SQUARE crop rect (frame coords).
     ///
     /// The icon is a colourful blob at the left of the row bar; the row bar and the
@@ -465,7 +539,8 @@ public sealed class SidebarReader
     /// margin (<see cref="IconCropMargin"/>) — tight to the artwork, consistent zoom.
     /// Falls back to a fixed geometric crop if no blob is found.
     /// </summary>
-    private static OpenCvRect DetectIconRect(OpenCvMat bgrFrame, OpenCvRect sidebarRect, int rowCenterY)
+    private static OpenCvRect DetectIconRect(OpenCvMat bgrFrame, OpenCvRect sidebarRect,
+        int rowCenterY, int searchHalfHeight)
     {
         OpenCvRect fallback = ClampToFrame(new OpenCvRect(
             sidebarRect.X + IconFallbackCenterFromSidebar - IconFallbackHalfSize,
@@ -474,9 +549,9 @@ public sealed class SidebarReader
 
         OpenCvRect win = ClampToFrame(new OpenCvRect(
             sidebarRect.X + IconSearchLeftFromSidebar,
-            rowCenterY - IconSearchHalfHeight,
+            rowCenterY - searchHalfHeight,
             IconSearchRightFromSidebar - IconSearchLeftFromSidebar,
-            IconSearchHalfHeight * 2), bgrFrame);
+            searchHalfHeight * 2), bgrFrame);
         if (win.Width < 50 || win.Height < 50) return fallback;
 
         using OpenCvMat roi = new(bgrFrame, win);
@@ -589,13 +664,14 @@ public sealed class SidebarReader
             for (int i = 0; i < items.Count; i++)
             {
                 SidebarItem it = items[i];
-                int rowCenterY = it.FrameRect.Y + it.FrameRect.Height / 2;
+                int rowCenterY = it.RowCenterY;
                 int y0 = i * rowH;
                 // The count column + checkmark area — what the count parse / capture
-                // detector consume.
+                // detector consume. Anchored on the regularised row centre and the
+                // count column's left edge so neither the label nor a neighbour bleeds in.
                 OpenCvRect numRect = ClampToFrame(new OpenCvRect(
-                    sidebarRect.X + 245, rowCenterY - 21,
-                    Math.Max(1, sidebarRect.Width - 245), 42), bgrFrame);
+                    sidebarRect.X + CountColumnLeftXInSidebar, rowCenterY - 24,
+                    Math.Max(1, sidebarRect.Width - CountColumnLeftXInSidebar), 48), bgrFrame);
                 if (numRect.Width > 4 && numRect.Height > 4)
                 {
                     using OpenCvMat crop = new(bgrFrame, numRect);

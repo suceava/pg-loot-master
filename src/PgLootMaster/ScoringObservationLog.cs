@@ -18,6 +18,7 @@ namespace PgLootMaster;
 /// </summary>
 public readonly record struct ScoringObservationRow(
     string GameId,
+    string GameStyle,
     int ScoreBefore,
     int ScoreAfter,
     int ScoreDelta,
@@ -32,7 +33,13 @@ public readonly record struct ScoringObservationRow(
     int SimTotalCells,
     int SimMaxRun,
     bool CleanTurn,
-    string Step0Signature);
+    string Step0Signature,
+    // The swapped cells (board coords). Lets offline analysis correlate score_delta
+    // with board region — e.g. whether a bottom or a centre swap is worth more.
+    int SwapRow1,
+    int SwapCol1,
+    int SwapRow2,
+    int SwapCol2);
 
 /// <summary>
 /// Append-only CSV logger for per-turn scoring observations, written to
@@ -48,10 +55,11 @@ public static class ScoringObservationLog
     private static readonly object Sync = new();
 
     private const string Header =
-        "timestamp_utc,game_id,score_before,score_after,score_delta,"
+        "timestamp_utc,game_id,game_style,score_before,score_after,score_delta,"
         + "total_count_delta,prior_captured_count,captured_this_turn,items_risen,"
         + "sim_swap_legal,sim_step_count,sim_step0_match_count,sim_step0_cells,"
-        + "sim_total_cells,sim_max_run,clean_turn,step0_signature";
+        + "sim_total_cells,sim_max_run,clean_turn,step0_signature,"
+        + "swap_row1,swap_col1,swap_row2,swap_col2";
 
     public static void Append(ScoringObservationRow row)
     {
@@ -60,11 +68,24 @@ public static class ScoringObservationLog
             try
             {
                 Directory.CreateDirectory(StoreDir);
+                // A schema change leaves the on-disk header stale, and a stale header
+                // silently drops the new columns on parse. If the existing file's
+                // header predates the current one, retire it (timestamped) so a fresh
+                // file is written with the up-to-date schema.
+                if (File.Exists(CsvPath))
+                {
+                    string onDiskHeader;
+                    using (StreamReader sr = new(CsvPath)) onDiskHeader = sr.ReadLine() ?? "";
+                    if (onDiskHeader != Header)
+                        File.Move(CsvPath, Path.Combine(StoreDir,
+                            $"scoring-observations.{DateTime.UtcNow:yyyyMMdd-HHmmss}.csv"));
+                }
                 bool isNew = !File.Exists(CsvPath);
                 string[] fields =
                 {
                     DateTime.UtcNow.ToString("o"),
                     Csv(row.GameId),
+                    Csv(row.GameStyle),
                     row.ScoreBefore.ToString(CultureInfo.InvariantCulture),
                     row.ScoreAfter.ToString(CultureInfo.InvariantCulture),
                     row.ScoreDelta.ToString(CultureInfo.InvariantCulture),
@@ -80,6 +101,10 @@ public static class ScoringObservationLog
                     row.SimMaxRun.ToString(CultureInfo.InvariantCulture),
                     row.CleanTurn ? "true" : "false",
                     Csv(row.Step0Signature),
+                    row.SwapRow1.ToString(CultureInfo.InvariantCulture),
+                    row.SwapCol1.ToString(CultureInfo.InvariantCulture),
+                    row.SwapRow2.ToString(CultureInfo.InvariantCulture),
+                    row.SwapCol2.ToString(CultureInfo.InvariantCulture),
                 };
                 string line = string.Join(",", fields);
                 File.AppendAllText(CsvPath, (isNew ? Header + "\n" : "") + line + "\n");

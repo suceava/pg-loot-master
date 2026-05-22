@@ -49,6 +49,34 @@ public class DeluxePanelTests
     }
 
     [Fact]
+    public void Lootmaster_and_deluxe_templates_share_a_left_margin()
+    {
+        // Every panel offset (sidebar, board, score region) is measured from titleBar.X
+        // — the matched template's left edge — so all panel-title*.png must crop the
+        // title text at the same left margin. panel-title.png and panel-title-deluxe.png
+        // both start with the word "Lootmaster", so their first text column must line
+        // up; a mismatch shifts the Deluxe sidebar crop and clips the OCR'd labels.
+        int loot = FirstTextColumn(Path.Combine(TemplateDir, "panel-title.png"));
+        int deluxe = FirstTextColumn(Path.Combine(TemplateDir, "panel-title-deluxe.png"));
+        Assert.True(Math.Abs(loot - deluxe) <= 4,
+            $"template left-margin mismatch: panel-title.png text@{loot}, panel-title-deluxe.png text@{deluxe}");
+    }
+
+    /// <summary>X of the first column holding gold title text (R high, R≫B).</summary>
+    private static int FirstTextColumn(string templatePath)
+    {
+        using Mat t = Cv2.ImRead(templatePath, ImreadModes.Color);
+        for (int x = 0; x < t.Width; x++)
+            for (int y = 0; y < t.Height; y++)
+            {
+                Vec3b p = t.At<Vec3b>(y, x);   // BGR
+                if (p.Item2 > 120 && p.Item1 > 90 && p.Item2 > p.Item0 + 30)
+                    return x;
+            }
+        return -1;
+    }
+
+    [Fact]
     public void Adding_deluxe_template_does_not_break_lootmaster_detection()
     {
         using Mat frame = Cv2.ImRead(Fixture("lootmaster-panel-fixture.png"), ImreadModes.Color);

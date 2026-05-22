@@ -876,6 +876,7 @@ public partial class OverlayWindow : Window
 
         ScoringObservationLog.Append(new ScoringObservationRow(
             GameId: _gameTracker.Active?.StartedUtc.ToString("o") ?? "",
+            GameStyle: _gameTracker.Active?.GameStyle ?? "",
             ScoreBefore: before,
             ScoreAfter: after,
             ScoreDelta: after - before,
@@ -890,7 +891,11 @@ public partial class OverlayWindow : Window
             SimTotalCells: res.TotalCellsMatched,
             SimMaxRun: res.MaxRunLength,
             CleanTurn: clean,
-            Step0Signature: sig.ToString()));
+            Step0Signature: sig.ToString(),
+            SwapRow1: swap.Swap.Row1,
+            SwapCol1: swap.Swap.Col1,
+            SwapRow2: swap.Swap.Row2,
+            SwapCol2: swap.Swap.Col2));
 
         OverlayLog.Write($"SCORING-OBS: delta={after - before} matched={totalCountDelta} "
             + $"clean={clean} priorCap={priorCaptured} capTurn={capturedThisTurn} sig=[{sig}]");

@@ -51,9 +51,11 @@ Project: Gorgon has three Bejeweled-style match-3 minigames at NPC vendors:
 - For point values, see **Scoring** below.
 
 **Scoring**
-- Reverse-engineered from 322 logged turns (see CSV path below). The formula is per
-  *match*, not per *turn*: a turn's score is the **sum over every match** the swap and
-  its cascades produce.
+- The formula is per *match*, not per *turn*: a turn's score is the **sum over every
+  match** the swap and its cascades produce. Loot Master / Cashfall and Deluxe use
+  **different** formulas — see below.
+
+***Loot Master / Cashfall*** — reverse-engineered from 322 logged turns:
 - A single match of **N tiles** scores **`2 × N − 3`** points.
 - Once **2 or more items have been captured** in the game, every match gets a flat
   **+2 bonus** — i.e. **`2 × N − 1`**. (The +2 jump tracked `prior_captured_count ≥ 2`
@@ -71,9 +73,30 @@ Project: Gorgon has three Bejeweled-style match-3 minigames at NPC vendors:
   | 6 tiles      | 9                          | 11                        |
   | 8 tiles      | 13                         | 15                        |
 
-- Per-turn observations are logged to
+***Deluxe*** — a **different, steeper** formula, reverse-engineered from 188 logged
+turns (57 clean no-cascade single matches):
+- A single match of **N tiles** scores **`3 × N − 6`** — **+3 per tile** (vs Loot
+  Master's +2).
+- The capture bonus **never caps**: every match gets **`+2 × ⌈C/2⌉`**, where `C` is the
+  number of items captured so far — `+0` at C=0, `+2` at C=1–2, `+4` at C=3–4, `+6` at
+  C=5–6. (Loot Master's bonus is a single one-time +2.)
+- Full per-match value: **`3N − 6 + 2⌈C/2⌉`**.
+
+  | Match length | C=0 | C=1–2 | C=3–4 |
+  |--------------|-----|-------|-------|
+  | 3 tiles      | 3   | 5     | 7     |
+  | 4 tiles      | 6   | 8     | 10    |
+  | 5 tiles      | 9   | 11    | 13    |
+
+- **Less certain — numbers to be refined:** only 2 clean 5-tile samples and no 6+-tile
+  samples (the `3N−6` slope is solid for 3–4 tiles, extrapolated above); `C ≥ 4` is
+  thin. As with Loot Master, `C` is confounded with turn-count / total score, so the
+  "per 2 captures" bonus step is the best fit, not a proven trigger.
+
+- Per-turn observations (both variants) are logged to
   `%APPDATA%/PgLootMaster/scoring-observations.csv` (always-on passive logging; see
-  `ScoringObservationLog`).
+  `ScoringObservationLog`). Rows carry a `game_style` column so the variants stay
+  separable.
 
 **Items & capturing**
 - Every tile is an item type. Matching an item's tiles builds that item's running
