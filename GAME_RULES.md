@@ -14,9 +14,8 @@ Project: Gorgon has three Bejeweled-style match-3 minigames at NPC vendors:
   level 30. Now reachable: panel-detection template added (`panel-title-deluxe.png`)
   and the board is confirmed a **7×7 grid with the same cell geometry** as Loot Master,
   so panel detection and board extraction work unchanged (covered by
-  `DeluxePanelTests`). Its sidebar adds **Turns Made** and **Possible Moves** stat rows
-  not present in Loot Master. Match/scoring rules are assumed identical pending
-  in-game confirmation.
+  `DeluxePanelTests`). The sidebar layout is the same as Loot Master. Match/scoring
+  rules are assumed identical pending in-game confirmation.
 
 ## What the tool optimizes for (the goal)
 
