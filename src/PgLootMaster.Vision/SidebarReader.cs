@@ -72,6 +72,13 @@ public sealed class SidebarReader
     // null until first successful read.
     public int? CaptureThreshold { get; private set; }
 
+    /// <summary>
+    /// PNG of a debug montage — one row per item, the cropped count-column region the
+    /// OCR reads (count digits + any checkmark) next to the parsed value — for eyeballing
+    /// the number reads. Rebuilt every <see cref="ReadItems"/>; null until the first read.
+    /// </summary>
+    public byte[]? LastNumbersMontagePng { get; private set; }
+
     // Number from the "Turns Left:" header row. null until first successful read.
     public int? TurnsLeft { get; private set; }
 
@@ -185,25 +192,29 @@ public sealed class SidebarReader
         // A name line is OCR text below the header and left of the count column. Lines
         // within RowGroupMaxGap of each other are the same row (a wrapped name like
         // "Power Potion" / "Extreme"); a larger jump starts a new row.
-        List<(int CenterY, string Name)> ocrRows = new();
+        // Track each row group's FIRST and LAST line — the row centre is their true
+        // midpoint. (A running pairwise average over-weights the last line, biasing the
+        // centre low for names that wrap to 3+ lines.)
+        List<(int FirstY, int LastY, string Name)> ocrRows = new();
         foreach (OcrLine line in sorted)
         {
             if (line.Bbox.Y < ItemAreaTopInSidebar) continue;      // header region
             if (line.Bbox.X >= ItemNameMaxXInSidebar) continue;    // count column
             if (!line.Text.Any(char.IsLetter)) continue;           // stray digit
             int yc = line.Bbox.Y + line.Bbox.Height / 2;
-            if (ocrRows.Count > 0 && yc - ocrRows[^1].CenterY <= RowGroupMaxGap)
+            if (ocrRows.Count > 0 && yc - ocrRows[^1].LastY <= RowGroupMaxGap)
             {
-                (int cy, string nm) = ocrRows[^1];
-                ocrRows[^1] = ((cy + yc) / 2, nm + " " + line.Text);
+                (int f, int _, string nm) = ocrRows[^1];
+                ocrRows[^1] = (f, yc, nm + " " + line.Text);
             }
             else
             {
-                ocrRows.Add((yc, line.Text));
+                ocrRows.Add((yc, yc, line.Text));
             }
         }
 
-        List<int> rowCentersY = ocrRows.Select(r => sidebarRect.Y + r.CenterY).ToList();
+        List<int> rowCentersY = ocrRows
+            .Select(r => sidebarRect.Y + (r.FirstY + r.LastY) / 2).ToList();
 
         // Gap-fill: a row whose name OCR failed entirely leaves a >1.5x-stride hole.
         // Insert evenly-spaced centres so the icon is still cropped (icon matching
@@ -235,9 +246,9 @@ public sealed class SidebarReader
             // Name: the OCR row group whose centre is nearest this row.
             string name = "";
             int bestD = ExpectedRowStride / 2;
-            foreach ((int cy, string nm) in ocrRows)
+            foreach ((int f, int l, string nm) in ocrRows)
             {
-                int d = Math.Abs((sidebarRect.Y + cy) - rowY);
+                int d = Math.Abs((sidebarRect.Y + (f + l) / 2) - rowY);
                 if (d < bestD) { bestD = d; name = nm; }
             }
 
@@ -286,12 +297,22 @@ public sealed class SidebarReader
             {
                 using OpenCvMat checkRoi = new(bgrFrame, checkRect);
                 using OpenCvMat greenMask = new();
-                Cv2.InRange(checkRoi, new Scalar(20, 140, 20), new Scalar(180, 255, 180), greenMask);
-                item.Captured = Cv2.CountNonZero(greenMask) > 30;
+                // Tight green: a real checkmark is saturated green (low R/B, high G).
+                Cv2.InRange(checkRoi, new Scalar(20, 150, 20), new Scalar(140, 255, 150), greenMask);
+                bool green = Cv2.CountNonZero(greenMask) > 30;
+                // Game-rule gate: an item below the capture threshold CANNOT be captured.
+                // A captured row shows a ✓ (count parses null/0); an uncaptured row shows
+                // its real count — so a visible positive count below the threshold
+                // overrides a false-positive green read.
+                item.Captured = (item.CaptureCount is int cc && cc > 0 && CaptureThreshold is int th)
+                    ? green && cc >= th
+                    : green;
             }
 
             items.Add(item);
         }
+
+        BuildNumbersMontage(bgrFrame, sidebarRect, items);
 
         // One-shot debug dump — but only on a VALID read, so it doesn't freeze a garbage
         // mid-transition frame (empty names, no icons) as the permanent diagnostic.
@@ -550,6 +571,52 @@ public sealed class SidebarReader
             if (gr >= 0.68 && br >= 0.30 && br <= 0.80) return false;
         }
         return true;
+    }
+
+    /// <summary>
+    /// Build the OCR-numbers debug montage: one row per item — the cropped count-column
+    /// region (count digits + checkmark area, exactly what the count parse / capture
+    /// detector see) next to the parsed value — so the number reads can be eyeballed.
+    /// </summary>
+    private void BuildNumbersMontage(OpenCvMat bgrFrame, OpenCvRect sidebarRect,
+        List<SidebarItem> items)
+    {
+        try
+        {
+            const int cropW = 150, rowH = 46;
+            int rows = Math.Max(items.Count, 1);
+            using OpenCvMat montage = new(rows * rowH, cropW + 300, MatType.CV_8UC3, Scalar.All(28));
+            for (int i = 0; i < items.Count; i++)
+            {
+                SidebarItem it = items[i];
+                int rowCenterY = it.FrameRect.Y + it.FrameRect.Height / 2;
+                int y0 = i * rowH;
+                // The count column + checkmark area — what the count parse / capture
+                // detector consume.
+                OpenCvRect numRect = ClampToFrame(new OpenCvRect(
+                    sidebarRect.X + 245, rowCenterY - 21,
+                    Math.Max(1, sidebarRect.Width - 245), 42), bgrFrame);
+                if (numRect.Width > 4 && numRect.Height > 4)
+                {
+                    using OpenCvMat crop = new(bgrFrame, numRect);
+                    using OpenCvMat resized = new();
+                    Cv2.Resize(crop, resized, new Size(cropW, rowH - 6));
+                    resized.CopyTo(montage[new OpenCvRect(0, y0 + 3, cropW, rowH - 6)]);
+                }
+                string name = it.Name.Length > 16 ? it.Name.Substring(0, 16) : it.Name;
+                if (string.IsNullOrEmpty(name)) name = $"row{i}";
+                string label = $"{name} = {(it.CaptureCount?.ToString() ?? "-")}"
+                    + (it.Captured ? "  [DONE]" : "");
+                Cv2.PutText(montage, label, new Point(cropW + 8, y0 + 29),
+                    HersheyFonts.HersheySimplex, 0.55, new Scalar(90, 255, 255), 1);
+            }
+            Cv2.ImEncode(".png", montage, out byte[] png);
+            LastNumbersMontagePng = png;
+        }
+        catch
+        {
+            // Debug aid only — never let it disturb the read.
+        }
     }
 
     private static OpenCvRect ClampToFrame(OpenCvRect r, OpenCvMat frame)

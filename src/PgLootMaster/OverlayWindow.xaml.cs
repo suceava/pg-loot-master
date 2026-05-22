@@ -207,6 +207,7 @@ public partial class OverlayWindow : Window
                     // early-game turns get skipped while the board isn't fully settled.
                     _latestSidebarItems = _sidebarReader.ReadItems(bgrFrame, loc.Value.TitleBar);
                     tSidebar = sw.ElapsedMilliseconds - tBeforeSidebar;
+                    UpdateNumbersMontage(_sidebarReader.LastNumbersMontagePng);
                     int sig = ComputeSidebarSignature(_latestSidebarItems);
                     if (sig != _lastSidebarSignature)
                     {
@@ -327,6 +328,8 @@ public partial class OverlayWindow : Window
                 _turnBoard = null;
                 _turnSwap = null;
                 _turnCounts.Clear();
+                _turnCaptured.Clear();
+                _turnScore = null;
                 // Drop the canonical cluster set — the next game has a different item
                 // roster, so it must be re-captured fresh after warmup.
                 _cellClusterer.Reset();
@@ -364,6 +367,8 @@ public partial class OverlayWindow : Window
                 && !GridEquals(_turnBoard, _latestClusterIds))
             {
                 CorrelateTurn(_turnBoard, _turnSwap, _turnCounts, _latestSidebarItems);
+                RecordScoringObservation(_turnBoard, _turnSwap, _turnScore, _sidebarReader.Score,
+                    _turnCounts, _turnCaptured, _latestSidebarItems);
             }
 
             _displayedCells = cells;
@@ -377,6 +382,11 @@ public partial class OverlayWindow : Window
             _turnBoard = (int[])_latestClusterIds.Clone();
             _turnSwap = _displayedRecommendation;
             _turnCounts = SnapshotCounts(_latestSidebarItems);
+            _turnCaptured = SnapshotCaptured(_latestSidebarItems);
+            // Score is 0 at game start, but OCR rarely confirms a lone "0" — keep the
+            // last known value through a transient miss, and fall back to 0 at the very
+            // start so the first move still logs a score-before.
+            _turnScore = _sidebarReader.Score ?? _turnScore ?? 0;
         }
 
         // Game-history per-frame capture. OnFrame is a no-op when gameStyle is null or
@@ -678,10 +688,14 @@ public partial class OverlayWindow : Window
     private int? _previouslyLoggedTurnsMade;
 
     // Turn-correlation state: the settled board the last shown recommendation was for,
-    // that recommendation, and the sidebar capture-counts at that moment.
+    // that recommendation, the sidebar capture-counts, and the score at that moment.
     private int[]? _turnBoard;
     private SwapRecommendation? _turnSwap;
     private Dictionary<string, int> _turnCounts = new();
+    private HashSet<string> _turnCaptured = new();
+    private int? _turnScore;
+    // Recent scoring observations for the debug panel — newest first, capped.
+    private readonly List<string> _scoringDisplayLines = new();
 
     private readonly SignatureLabeler _signatureLabeler = new();
     private PgLootMaster.Vision.LabelDiagnostics? _latestLabelDiag;
@@ -703,6 +717,15 @@ public partial class OverlayWindow : Window
         foreach (SidebarItem it in sidebar)
             if (!string.IsNullOrEmpty(it.Name) && it.CaptureCount is int c)
                 snap[it.Name] = c;
+        return snap;
+    }
+
+    private static HashSet<string> SnapshotCaptured(IReadOnlyList<SidebarItem> sidebar)
+    {
+        HashSet<string> snap = new();
+        foreach (SidebarItem it in sidebar)
+            if (!string.IsNullOrEmpty(it.Name) && it.Captured)
+                snap.Add(it.Name);
         return snap;
     }
 
@@ -783,6 +806,124 @@ public partial class OverlayWindow : Window
     }
 
     /// <summary>
+    /// Log one row of scoring-observation data: what the just-played swap directly
+    /// matched (the deterministic step-0 signature) paired with the actual OCR'd score
+    /// delta. Accumulated across games to reverse-engineer the real scoring formula — the
+    /// solver's per-match point values are currently guesses. Pure passive logging; never
+    /// affects recommendations. See <see cref="ScoringObservationLog"/>.
+    /// </summary>
+    private void RecordScoringObservation(int[] boardN, SwapRecommendation swap,
+        int? scoreBefore, int? scoreAfter,
+        Dictionary<string, int> countsBefore, HashSet<string> capturedBefore,
+        IReadOnlyList<SidebarItem> sidebarNow)
+    {
+        if (scoreBefore is not int before || scoreAfter is not int after) return;
+        if (boardN.Length != SolverBoard.Dim * SolverBoard.Dim) return;
+
+        // --- Per-item capture-count deltas (sidebar OCR) ---
+        // An uncaptured item's count rises by exactly the tiles of it matched this turn,
+        // across the WHOLE cascade (incl. refills) — a ground-truth tile count the
+        // simulator can't give. But a captured item's count FREEZES, so the total
+        // undercounts on turns where an already-captured item was matched; that is why
+        // PriorCapturedCount is logged as the reliability flag.
+        int totalCountDelta = 0, capturedThisTurn = 0;
+        System.Text.StringBuilder risen = new();
+        foreach (SidebarItem it in sidebarNow)
+        {
+            if (string.IsNullOrEmpty(it.Name)) continue;
+            if (it.Captured && !capturedBefore.Contains(it.Name)) capturedThisTurn++;
+            if (it.CaptureCount is not int curr) continue;
+            if (!countsBefore.TryGetValue(it.Name, out int prev)) continue;   // no baseline
+            int d = curr - prev;
+            if (d <= 0) continue;
+            totalCountDelta += d;
+            if (risen.Length > 0) risen.Append('|');
+            risen.Append(it.Name).Append('+').Append(d);
+        }
+        int priorCaptured = capturedBefore.Count;
+
+        // --- Cascade simulation: reliable for step 0 only ---
+        int[,] grid = new int[SolverBoard.Dim, SolverBoard.Dim];
+        for (int r = 0; r < SolverBoard.Dim; r++)
+            for (int c = 0; c < SolverBoard.Dim; c++)
+                grid[r, c] = boardN[r * SolverBoard.Dim + c];
+
+        CascadeResult res;
+        try { res = CascadeSimulator.Resolve(new SolverBoard(grid), swap.Swap); }
+        catch (Exception ex)
+        {
+            OverlayLog.Write($"SCORING-OBS: Resolve threw {ex.GetType().Name} — row skipped");
+            return;
+        }
+
+        bool legal = res.SwapLegal && res.Steps.Count > 0;
+        int step0Matches = 0, step0Cells = 0;
+        System.Text.StringBuilder sig = new();        // full, with type id — for the CSV
+        System.Text.StringBuilder sigShort = new();   // length + orientation — for the panel
+        if (legal)
+        {
+            foreach (Match m in res.Steps[0])
+            {
+                step0Matches++;
+                step0Cells += m.Length;
+                char orient = OrientationOf(m);
+                if (sig.Length > 0) { sig.Append('|'); sigShort.Append('|'); }
+                sig.Append(m.Length).Append(orient).Append('t').Append(m.Tile.TypeId);
+                sigShort.Append(m.Length).Append(orient);
+            }
+        }
+        bool clean = legal && step0Matches == 1 && res.Steps.Count == 1;
+
+        ScoringObservationLog.Append(new ScoringObservationRow(
+            GameId: _gameTracker.Active?.StartedUtc.ToString("o") ?? "",
+            ScoreBefore: before,
+            ScoreAfter: after,
+            ScoreDelta: after - before,
+            TotalCountDelta: totalCountDelta,
+            PriorCapturedCount: priorCaptured,
+            CapturedThisTurn: capturedThisTurn,
+            ItemsRisen: risen.ToString(),
+            SimSwapLegal: res.SwapLegal,
+            SimStepCount: res.Steps.Count,
+            SimStep0MatchCount: step0Matches,
+            SimStep0Cells: step0Cells,
+            SimTotalCells: res.TotalCellsMatched,
+            SimMaxRun: res.MaxRunLength,
+            CleanTurn: clean,
+            Step0Signature: sig.ToString()));
+
+        OverlayLog.Write($"SCORING-OBS: delta={after - before} matched={totalCountDelta} "
+            + $"clean={clean} priorCap={priorCaptured} capTurn={capturedThisTurn} sig=[{sig}]");
+
+        // Live readout in the debug panel so the score formula can be eyeballed.
+        string deltaStr = (after - before >= 0 ? "+" : "") + (after - before);
+        string flags = "";
+        if (res.SwapLegal && !clean) flags += " ~casc";
+        if (priorCaptured > 0) flags += " ~capd";
+        string simSig = res.SwapLegal && sigShort.Length > 0 ? sigShort.ToString() : "illegal";
+        string capNote = capturedThisTurn > 0 ? "  *CAPTURE*" : "";
+        string moveLine = $"{totalCountDelta} matched  ->  {deltaStr}   [{simSig}{flags}]{capNote}";
+        _scoringDisplayLines.Insert(0, moveLine);
+        if (_scoringDisplayLines.Count > 5) _scoringDisplayLines.RemoveAt(5);
+        string moves = string.Join("\n", _scoringDisplayLines);
+        Dispatcher.BeginInvoke(() => ScoringText.Text = moves);
+    }
+
+    /// <summary>'V' if all of a match's cells share a column, 'H' if all share a row.</summary>
+    private static char OrientationOf(Match m)
+    {
+        if (m.Cells.Count == 0) return '?';
+        int r0 = m.Cells[0].Row, c0 = m.Cells[0].Col;
+        bool sameRow = true, sameCol = true;
+        foreach (Cell cell in m.Cells)
+        {
+            if (cell.Row != r0) sameRow = false;
+            if (cell.Col != c0) sameCol = false;
+        }
+        return sameCol ? 'V' : sameRow ? 'H' : '?';
+    }
+
+    /// <summary>
     /// Score the pure VISUAL labeler against a ground-truth cluster→item mapping. The
     /// AvgScore matrix is unaffected by Phase-3 locks, so this isolates the visual
     /// matcher's real skill. Logs a running tally; no manual annotation.
@@ -846,6 +987,29 @@ public partial class OverlayWindow : Window
                 bmp.EndInit();
                 bmp.Freeze();
                 CropMontageImage.Source = bmp;
+            }
+            catch { }
+        });
+    }
+
+    private byte[]? _shownNumbersMontage;
+
+    /// <summary>Push the sidebar reader's OCR-numbers montage into the debug-window Image.</summary>
+    private void UpdateNumbersMontage(byte[]? png)
+    {
+        if (png is null || ReferenceEquals(png, _shownNumbersMontage)) return;
+        _shownNumbersMontage = png;
+        Dispatcher.BeginInvoke(() =>
+        {
+            try
+            {
+                System.Windows.Media.Imaging.BitmapImage bmp = new();
+                bmp.BeginInit();
+                bmp.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+                bmp.StreamSource = new System.IO.MemoryStream(png);
+                bmp.EndInit();
+                bmp.Freeze();
+                NumbersMontageImage.Source = bmp;
             }
             catch { }
         });

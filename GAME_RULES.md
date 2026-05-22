@@ -45,8 +45,32 @@ Project: Gorgon has three Bejeweled-style match-3 minigames at NPC vendors:
 - An **L/T shape**, or **two 3-matches from one swap**, grants extra turns.
 - Matched tiles clear → tiles above fall by gravity → new tiles refill from the top →
   any resulting **cascades** also score.
-- Scoring is **not** a flat "3 points per 3-match" — a 3-match was observed scoring 5.
-  The exact scoring formula is unknown (see "Needs in-game confirmation").
+- For point values, see **Scoring** below.
+
+**Scoring**
+- Reverse-engineered from 322 logged turns (see CSV path below). The formula is per
+  *match*, not per *turn*: a turn's score is the **sum over every match** the swap and
+  its cascades produce.
+- A single match of **N tiles** scores **`2 × N − 3`** points.
+- Once **2 or more items have been captured** in the game, every match gets a flat
+  **+2 bonus** — i.e. **`2 × N − 1`**. (The +2 jump tracked `prior_captured_count ≥ 2`
+  exactly; it may be confounded with item-type count or raw game progression — treat
+  the *trigger* as less certain than the values.)
+- **Match orientation (horizontal vs vertical) does not affect score.**
+- **4- and 5-matches give no point bonus** over their length — their reward is the
+  extra turn(s). A 4-match scores exactly what four tiles score.
+
+  | Match length | Early game (`<2` captured) | Late game (`≥2` captured) |
+  |--------------|----------------------------|---------------------------|
+  | 3 tiles      | 3                          | 5                         |
+  | 4 tiles      | 5                          | 7                         |
+  | 5 tiles      | 7                          | 9                         |
+  | 6 tiles      | 9                          | 11                        |
+  | 8 tiles      | 13                         | 15                        |
+
+- Per-turn observations are logged to
+  `%APPDATA%/PgLootMaster/scoring-observations.csv` (always-on passive logging; see
+  `ScoringObservationLog`).
 
 **Items & capturing**
 - Every tile is an item type. Matching an item's tiles builds that item's running
@@ -72,10 +96,9 @@ Project: Gorgon has three Bejeweled-style match-3 minigames at NPC vendors:
 
 ## Needs in-game confirmation
 
-- **Scoring formula** — exact point values per match. Confirmed NOT flat (a 3-match was
-  seen scoring 5). Unknown whether match length, item type, cascade depth, or board
-  position factor in — and whether capturing an item adds any score (assumed it does
-  not). *Candidate to reverse-engineer empirically — see below.*
+- **Late-game +2 trigger** — the +2 per-match bonus correlates exactly with
+  `prior_captured_count ≥ 2`, but that is confounded with item-type count and game
+  progression. Confirm what actually flips it.
 - **Capture threshold sequence** — believed 30, 30, 25, … by capture order; verify.
 - Whether **gravity-cascade** matches grant turn bonuses, or only the swap's own matches.
 - Exact turn bonus for two-connected-3-matches.

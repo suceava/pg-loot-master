@@ -32,10 +32,22 @@
                            FontSize="14"
                            Foreground="White"
                            Text="Awaiting board..." />
+                <TextBlock Text="── last moves: tiles matched → score gained ──"
+                           FontFamily="Consolas" FontSize="11" Foreground="#FF80FF80"
+                           Margin="0,10,0,3" />
+                <TextBlock x:Name="ScoringText"
+                           FontFamily="Consolas" FontSize="13" Foreground="#FFFFE060"
+                           Text="(no moves yet)" />
                 <TextBlock Text="── clustering input (per-cell crops · number = cluster ID) ──"
                            FontFamily="Consolas" FontSize="11" Foreground="#FF80FF80"
                            Margin="0,10,0,3" />
                 <Image x:Name="CropMontageImage" Width="480" Stretch="Uniform"
+                       HorizontalAlignment="Left"
+                       RenderOptions.BitmapScalingMode="NearestNeighbor" />
+                <TextBlock Text="── OCR number reads (count-region crop · = parsed value) ──"
+                           FontFamily="Consolas" FontSize="11" Foreground="#FF80FF80"
+                           Margin="0,10,0,3" />
+                <Image x:Name="NumbersMontageImage" Width="460" Stretch="Uniform"
                        HorizontalAlignment="Left"
                        RenderOptions.BitmapScalingMode="NearestNeighbor" />
             </StackPanel>
