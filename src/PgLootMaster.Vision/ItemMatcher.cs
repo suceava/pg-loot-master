@@ -998,9 +998,13 @@ public sealed class LabelDiagnostics
     public string[] TemplateNames { get; }       // sidebar item names, in template index order
     public HashSet<int> LockedClusterIds { get; } // clusters whose label came from a Phase-3 ground-truth event lock
 
+    // PNG of the board-tile vs sidebar-icon comparison montage — one row per cluster,
+    // showing the actual crops the labeler matched. Null if the labeler didn't build one.
+    public byte[]? ComparisonMontagePng { get; }
+
     public LabelDiagnostics(int[] labels, int[] cellsPerCluster, double[] avgScoresFlat,
         int clusterCount, int templateCount, string[] templateNames,
-        HashSet<int>? lockedClusterIds = null)
+        HashSet<int>? lockedClusterIds = null, byte[]? comparisonMontagePng = null)
     {
         Labels = labels;
         CellsPerCluster = cellsPerCluster;
@@ -1009,6 +1013,7 @@ public sealed class LabelDiagnostics
         TemplateCount = templateCount;
         TemplateNames = templateNames;
         LockedClusterIds = lockedClusterIds ?? new HashSet<int>();
+        ComparisonMontagePng = comparisonMontagePng;
     }
 
     public bool IsLocked(int cluster) => LockedClusterIds.Contains(cluster);

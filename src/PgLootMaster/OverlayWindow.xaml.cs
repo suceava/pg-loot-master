@@ -248,19 +248,18 @@ public partial class OverlayWindow : Window
                             if (OverlaySettings.Instance.SolverStrategy == (int)SolverStrategy.TargetHunter
                                 || labelerDebugOpen)
                             {
-                                // Phase 3 event-based learning: feed the tracker with the
-                                // latest sidebar + cluster state, then push any learned
-                                // ground-truth mappings into the matcher BEFORE the visual
-                                // labeling pass so they get applied as hard locks.
-                                _labelerEventTracker.OnFrame(_latestSidebarItems, _latestClusterIds);
-                                _itemMatcher.SetLearnedLabels(_labelerEventTracker.Learned);
-
+                                // Signature-based labeling: match each cluster's canonical
+                                // rep to a sidebar icon with the SAME NCC+chroma signature
+                                // the clusterer uses (board tile and sidebar icon are the
+                                // same artwork). Purely visual, correct from frame 0.
                                 long tBeforeLabel = sw.ElapsedMilliseconds;
-                                _latestClusterToTemplate = _itemMatcher.LabelClusters(bgrFrame, cells, _latestClusterIds);
+                                _latestClusterToTemplate = _signatureLabeler.Label(
+                                    _cellClusterer, _latestSidebarItems, _latestClusterIds,
+                                    out _latestLabelDiag);
                                 tLabel = sw.ElapsedMilliseconds - tBeforeLabel;
                                 if (labelerDebugOpen)
                                 {
-                                    PgLootMaster.Vision.LabelDiagnostics? diag = _itemMatcher.LastLabelDiagnostics;
+                                    PgLootMaster.Vision.LabelDiagnostics? diag = _latestLabelDiag;
                                     Dispatcher.BeginInvoke(() => OnLabelerDiagnosticsChanged?.Invoke(diag));
                                 }
                             }
@@ -322,9 +321,12 @@ public partial class OverlayWindow : Window
                 // Reset SidebarReader's monotonic floors so the next game's Score=0 / TurnsMade=0
                 // reads aren't rejected as "backward jumps" from the previous game's finals.
                 _sidebarReader.ResetForNewGame();
-                // Clear Phase-3 learned mappings — cluster IDs in the next game don't
-                // correspond to the same items.
+                // Clear Phase-3 learned mappings + turn-correlation state — cluster IDs
+                // in the next game don't correspond to the same items.
                 _labelerEventTracker.ResetForNewGame();
+                _turnBoard = null;
+                _turnSwap = null;
+                _turnCounts.Clear();
                 // Drop the canonical cluster set — the next game has a different item
                 // roster, so it must be re-captured fresh after warmup.
                 _cellClusterer.Reset();
@@ -353,11 +355,28 @@ public partial class OverlayWindow : Window
         }
         if (acceptThisFrame)
         {
+            // Correlate the move that produced this board. The player always plays the
+            // recommended swap, so the previous turn's board + swap + sidebar counts tell
+            // us — with certainty — which cluster is which item. Done before the snapshot
+            // below is overwritten.
+            if (_turnBoard is not null && _turnSwap is not null
+                && _turnBoard.Length == _latestClusterIds.Length
+                && !GridEquals(_turnBoard, _latestClusterIds))
+            {
+                CorrelateTurn(_turnBoard, _turnSwap, _turnCounts, _latestSidebarItems);
+            }
+
             _displayedCells = cells;
             _displayedClusterIds = _latestClusterIds;
             long tBeforeSolve = sw.ElapsedMilliseconds;
             _displayedRecommendation = TrySolve(_latestClusterIds);
             tSolve = sw.ElapsedMilliseconds - tBeforeSolve;
+
+            // Snapshot this settled board + its recommendation + sidebar counts as the
+            // baseline for correlating the NEXT move.
+            _turnBoard = (int[])_latestClusterIds.Clone();
+            _turnSwap = _displayedRecommendation;
+            _turnCounts = SnapshotCounts(_latestSidebarItems);
         }
 
         // Game-history per-frame capture. OnFrame is a no-op when gameStyle is null or
@@ -657,6 +676,157 @@ public partial class OverlayWindow : Window
     private string? _previouslyLoggedTargetName;
     private int? _previouslyLoggedScore;
     private int? _previouslyLoggedTurnsMade;
+
+    // Turn-correlation state: the settled board the last shown recommendation was for,
+    // that recommendation, and the sidebar capture-counts at that moment.
+    private int[]? _turnBoard;
+    private SwapRecommendation? _turnSwap;
+    private Dictionary<string, int> _turnCounts = new();
+
+    private readonly SignatureLabeler _signatureLabeler = new();
+    private PgLootMaster.Vision.LabelDiagnostics? _latestLabelDiag;
+
+    private int _labelerMeasureCorrect;
+    private int _labelerMeasureTotal;
+    private int _labelerSidebarMiss;
+
+    private static bool GridEquals(int[] a, int[] b)
+    {
+        if (a.Length != b.Length) return false;
+        for (int i = 0; i < a.Length; i++) if (a[i] != b[i]) return false;
+        return true;
+    }
+
+    private static Dictionary<string, int> SnapshotCounts(IReadOnlyList<SidebarItem> sidebar)
+    {
+        Dictionary<string, int> snap = new();
+        foreach (SidebarItem it in sidebar)
+            if (!string.IsNullOrEmpty(it.Name) && it.CaptureCount is int c)
+                snap[it.Name] = c;
+        return snap;
+    }
+
+    /// <summary>
+    /// Correlate the move that just resolved into ground-truth cluster→item knowledge.
+    /// The player always plays the recommended swap, so apply <paramref name="swap"/> to
+    /// the pre-move board, find the run it created, and match that run's cluster + size to
+    /// the item whose capture-count rose by the same amount. That cluster IS that item —
+    /// fed to the Phase-3 learned map AND used to score the visual labeler.
+    /// </summary>
+    private void CorrelateTurn(int[] boardN, SwapRecommendation swap,
+        Dictionary<string, int> countsAtN, IReadOnlyList<SidebarItem> sidebarNow)
+    {
+        if (boardN.Length != SolverBoard.Dim * SolverBoard.Dim) return;
+
+        // Which item(s) rose, by how much? Learn only from unambiguous single-item turns.
+        List<(string name, int by)> risen = new();
+        foreach (SidebarItem it in sidebarNow)
+        {
+            if (string.IsNullOrEmpty(it.Name) || it.CaptureCount is not int curr) continue;
+            if (!countsAtN.TryGetValue(it.Name, out int prev) || curr <= prev) continue;
+            risen.Add((it.Name, curr - prev));
+        }
+        string risenStr = risen.Count == 0 ? "none"
+            : string.Join(", ", risen.Select(r => $"{r.name}+{r.by}"));
+        OverlayLog.Write($"CORRELATE: swap ({swap.Swap.Row1},{swap.Swap.Col1})<->"
+            + $"({swap.Swap.Row2},{swap.Swap.Col2}); items risen: {risenStr}");
+
+        if (risen.Count != 1 || risen[0].by < 3)
+        {
+            OverlayLog.Write($"CORRELATE: skipped — need exactly 1 item risen by 3+ "
+                + $"(got {risen.Count})");
+            return;
+        }
+        string risenItem = risen[0].name;
+        int risenBy = risen[0].by;
+
+        // Apply the recommended swap to the pre-move board; find the run it created.
+        int[,] grid = new int[SolverBoard.Dim, SolverBoard.Dim];
+        for (int r = 0; r < SolverBoard.Dim; r++)
+            for (int c = 0; c < SolverBoard.Dim; c++)
+                grid[r, c] = boardN[r * SolverBoard.Dim + c];
+        CascadeResult res;
+        try { res = CascadeSimulator.Resolve(new SolverBoard(grid), swap.Swap); }
+        catch (Exception ex) { OverlayLog.Write($"CORRELATE: Resolve threw {ex.GetType().Name}"); return; }
+        if (!res.SwapLegal || res.Steps.Count == 0)
+        {
+            OverlayLog.Write($"CORRELATE: skipped — swap is illegal on our board model "
+                + "(clustering of the pre-move board was wrong)");
+            return;
+        }
+
+        // Step-0 matched cells grouped by cluster value. The cluster whose run size equals
+        // the item's count delta is the matched item — require it to be unambiguous.
+        Dictionary<int, int> byCluster = new();
+        foreach (Match m in res.Steps[0])
+            foreach (Cell cell in m.Cells)
+            {
+                int cv = grid[cell.Row, cell.Col];
+                byCluster.TryGetValue(cv, out int n);
+                byCluster[cv] = n + 1;
+            }
+        string clStr = string.Join(", ", byCluster.Select(kv => $"cl{kv.Key}:{kv.Value}"));
+        int truthCluster = -1, matches = 0;
+        foreach (KeyValuePair<int, int> kv in byCluster)
+            if (kv.Value == risenBy) { truthCluster = kv.Key; matches++; }
+        if (matches != 1)
+        {
+            OverlayLog.Write($"CORRELATE: skipped — step-0 matched [{clStr}], "
+                + $"{matches} cluster(s) match the +{risenBy} delta (need exactly 1)");
+            return;
+        }
+
+        OverlayLog.Write($"CORRELATE: LOCK cluster {truthCluster} = '{risenItem}' "
+            + $"(step-0 matched [{clStr}], delta +{risenBy})");
+        _labelerEventTracker.Learn(truthCluster, risenItem);
+        RecordLabelerCheck(truthCluster, risenItem);
+    }
+
+    /// <summary>
+    /// Score the pure VISUAL labeler against a ground-truth cluster→item mapping. The
+    /// AvgScore matrix is unaffected by Phase-3 locks, so this isolates the visual
+    /// matcher's real skill. Logs a running tally; no manual annotation.
+    /// </summary>
+    private void RecordLabelerCheck(int clusterId, string truthName)
+    {
+        PgLootMaster.Vision.LabelDiagnostics? diag = _latestLabelDiag;
+        if (diag is null || clusterId < 0 || clusterId >= diag.ClusterCount || diag.TemplateCount == 0)
+            return;
+        if (clusterId < diag.CellsPerCluster.Length && diag.CellsPerCluster[clusterId] == 0)
+            return;   // cluster has no cells on the current board — no visual opinion to score
+
+        int truthTemplate = -1;
+        for (int t = 0; t < diag.TemplateNames.Length; t++)
+            if (string.Equals(diag.TemplateNames[t], truthName, StringComparison.OrdinalIgnoreCase))
+            { truthTemplate = t; break; }
+        if (truthTemplate < 0)
+        {
+            // SidebarReader never produced a template for the ground-truth item — an
+            // upstream miss, not a labeler error. Tally separately.
+            _labelerSidebarMiss++;
+            OverlayLog.Write($"LABELER-MEASURE: cluster {clusterId} truth='{truthName}' — "
+                + $"no sidebar template (SidebarReader miss #{_labelerSidebarMiss})");
+            return;
+        }
+
+        int visualBest = 0;
+        double best = double.NegativeInfinity, runnerUp = double.NegativeInfinity;
+        for (int t = 0; t < diag.TemplateCount; t++)
+        {
+            double s = diag.AvgScore(clusterId, t);
+            if (s > best) { runnerUp = best; best = s; visualBest = t; }
+            else if (s > runnerUp) runnerUp = s;
+        }
+        bool ok = visualBest == truthTemplate;
+        _labelerMeasureTotal++;
+        if (ok) _labelerMeasureCorrect++;
+        string visualName = visualBest < diag.TemplateNames.Length ? diag.TemplateNames[visualBest] : "?";
+        double pct = 100.0 * _labelerMeasureCorrect / _labelerMeasureTotal;
+        OverlayLog.Write($"LABELER-MEASURE: cluster {clusterId} truth='{truthName}' visual='{visualName}' "
+            + $"conf={best - runnerUp:F3} {(ok ? "OK" : "WRONG")} — running "
+            + $"{_labelerMeasureCorrect}/{_labelerMeasureTotal} ({pct:F0}%)"
+            + (_labelerSidebarMiss > 0 ? $", sidebar-misses={_labelerSidebarMiss}" : ""));
+    }
 
     private byte[]? _shownMontage;
 

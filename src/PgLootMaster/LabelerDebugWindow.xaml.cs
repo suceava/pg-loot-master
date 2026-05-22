@@ -60,8 +60,11 @@ public partial class LabelerDebugWindow : Window
             _rows = new List<ClusterRow>();
             ClustersGrid.ItemsSource = null;
             ClustersGrid.ItemsSource = _rows;
+            ComparisonImage.Source = null;
             return;
         }
+
+        ComparisonImage.Source = DecodePng(diag.ComparisonMontagePng);
 
         List<ClusterRow> next = new();
         for (int c = 0; c < diag.ClusterCount; c++)
@@ -119,6 +122,26 @@ public partial class LabelerDebugWindow : Window
             }
         }
         UpdateStats();
+    }
+
+    /// <summary>Decode the labeler's comparison-montage PNG into a frozen bitmap.</summary>
+    private static ImageSource? DecodePng(byte[]? png)
+    {
+        if (png is null || png.Length == 0) return null;
+        try
+        {
+            var bmp = new System.Windows.Media.Imaging.BitmapImage();
+            bmp.BeginInit();
+            bmp.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+            bmp.StreamSource = new MemoryStream(png);
+            bmp.EndInit();
+            bmp.Freeze();
+            return bmp;
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private void OnWindowKeyDown(object sender, KeyEventArgs e)

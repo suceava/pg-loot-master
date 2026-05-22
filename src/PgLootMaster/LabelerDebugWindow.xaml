@@ -5,8 +5,8 @@
         WindowStyle="ToolWindow"
         Topmost="True"
         ShowInTaskbar="False"
-        Width="820"
-        Height="560"
+        Width="1190"
+        Height="640"
         WindowStartupLocation="CenterOwner"
         Background="#FF1E1E1E"
         Foreground="White"
@@ -53,6 +53,37 @@
                        FontSize="11"
                        TextWrapping="Wrap"
                        Text="(no annotations yet)" />
+        </Border>
+
+        <Border DockPanel.Dock="Right"
+                Background="#FF202020"
+                BorderBrush="#FF333333"
+                BorderThickness="1"
+                CornerRadius="3"
+                Margin="10,0,0,0"
+                Width="354">
+            <DockPanel>
+                <TextBlock DockPanel.Dock="Top"
+                           Foreground="#FFAAAAAA"
+                           FontSize="11"
+                           Margin="6,6,6,4"
+                           TextWrapping="Wrap">
+                    What the labeler compared, per cluster:
+                    <Run FontWeight="Bold" Foreground="White">board</Run> tile vs the
+                    <Run FontWeight="Bold" Foreground="White">match</Run>ed and
+                    <Run FontWeight="Bold" Foreground="White">runner</Run>-up sidebar icons,
+                    at the exact crops used. Lower d = closer.
+                </TextBlock>
+                <ScrollViewer VerticalScrollBarVisibility="Auto"
+                              HorizontalScrollBarVisibility="Auto">
+                    <Image x:Name="ComparisonImage"
+                           Stretch="None"
+                           HorizontalAlignment="Left"
+                           VerticalAlignment="Top"
+                           RenderOptions.BitmapScalingMode="NearestNeighbor"
+                           Margin="6" />
+                </ScrollViewer>
+            </DockPanel>
         </Border>
 
         <DataGrid x:Name="ClustersGrid"

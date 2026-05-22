@@ -126,6 +126,7 @@ public sealed class CellClusterer
     private const double CommitClearThreshold = 20.0;
 
     private List<CellSignature>? _canonicalClusterReps;
+    private List<OpenCvMat?>? _canonicalRepCrops;
     private CellSignature[]? _previousSignatures;
     private int[]? _settledIds;
     private double[]? _settledDists;
@@ -161,6 +162,20 @@ public sealed class CellClusterer
     public byte[]? LastCropMontagePng { get; private set; }
 
     /// <summary>
+    /// Canonical cluster representatives — index = cluster ID. The labeler matches these
+    /// against sidebar-icon signatures (same metric) to put a name on each cluster.
+    /// </summary>
+    internal IReadOnlyList<CellSignature>? CanonicalReps => _canonicalClusterReps;
+
+    /// <summary>
+    /// One BGR image crop per cluster — the inner-58% crop <see cref="ComputeSignature"/>
+    /// actually consumes. Parallel to <see cref="CanonicalReps"/>. Exposed so the labeler
+    /// can render a board-tile vs sidebar-icon comparison in the debug window. An entry is
+    /// null if that cluster had no cell on the board when the crops were last refreshed.
+    /// </summary>
+    internal IReadOnlyList<OpenCvMat?>? CanonicalRepCrops => _canonicalRepCrops;
+
+    /// <summary>
     /// Unused — clustering is metric-driven and infers the cluster count itself; it does
     /// not take a target. Kept on the API because OverlayWindow still sets it.
     /// </summary>
@@ -173,6 +188,11 @@ public sealed class CellClusterer
     public void Reset()
     {
         _canonicalClusterReps = null;
+        if (_canonicalRepCrops is not null)
+        {
+            foreach (OpenCvMat? m in _canonicalRepCrops) m?.Dispose();
+            _canonicalRepCrops = null;
+        }
         _previousSignatures = null;
         _settledIds = null;
         _settledDists = null;
@@ -235,9 +255,11 @@ public sealed class CellClusterer
             CaptureCanonical(AverageBuffer());
             _settledIds = AssignBestFrame(_stillBuffer.ToArray(), out double[] capDists);
             _settledDists = capDists;
+            PruneUnusedReps(0);
             _committedThisSettle = true;
-            LogGrid("CAPTURE", _settledIds, capDists);
+            LogGrid("CAPTURE", _settledIds, _settledDists);
             DumpCellCrops(bgrFrame, cells, _settledIds);
+            CaptureRepCrops(bgrFrame, cells, _settledIds);
         }
 
         // --- Per-cascade re-commit ---
@@ -260,6 +282,7 @@ public sealed class CellClusterer
 
             if (worstMatch < CommitClearThreshold || _framesWaitingToCommit >= MaxCommitWaitFrames)
             {
+                int oldRepCount = _canonicalClusterReps.Count;
                 // Any cell matching NO existing rep is a freshly-introduced tile type.
                 // Cluster those cells and APPEND new reps (the canonical only grows;
                 // existing reps untouched), then re-assign so the new tiles — and the
@@ -280,9 +303,14 @@ public sealed class CellClusterer
                 }
                 _settledIds = candidate;
                 _settledDists = cellDists;
+                // Drop any just-appended rep that no cell ended up matching (a transient
+                // animating cell can trigger a junk append). Only reps appended THIS
+                // commit are eligible — older IDs are frozen and never renumber.
+                PruneUnusedReps(oldRepCount);
                 _committedThisSettle = true;
                 LogGrid($"COMMIT {_framesWaitingToCommit}f", candidate, cellDists);
                 DumpCellCrops(bgrFrame, cells, candidate);
+                CaptureRepCrops(bgrFrame, cells, candidate);
             }
         }
 
@@ -354,6 +382,56 @@ public sealed class CellClusterer
             }
         }
         ClustererLog.Write(sb.ToString());
+    }
+
+    /// <summary>
+    /// Drop canonical reps that no cell actually matches. <see cref="CaptureCanonical"/>
+    /// clusters AVERAGED signatures, but cells are assigned by BEST-frame distance — a
+    /// hint-animated tile's blurred average can spawn a centroid that, under best-frame
+    /// assignment, no cell ever claims. Such a 0-cell rep is a phantom "item type" and
+    /// must not exist (the game has a hard max of real types). Reps below
+    /// <paramref name="protectFirst"/> are kept regardless, so already-frozen cluster IDs
+    /// never renumber: pass 0 at capture (nothing frozen yet), or the pre-append rep
+    /// count at a commit (only this commit's fresh appends are eligible to be pruned).
+    /// Remaps <see cref="_settledIds"/> and <see cref="_canonicalRepCrops"/> to match.
+    /// </summary>
+    private void PruneUnusedReps(int protectFirst)
+    {
+        if (_canonicalClusterReps is null || _settledIds is null) return;
+        int n = _canonicalClusterReps.Count;
+        int[] cellsPerRep = new int[n];
+        foreach (int id in _settledIds)
+            if (id >= 0 && id < n) cellsPerRep[id]++;
+
+        int[] remap = new int[n];
+        List<CellSignature> keptReps = new();
+        List<OpenCvMat?>? keptCrops = _canonicalRepCrops is null ? null : new List<OpenCvMat?>();
+        int next = 0;
+        for (int i = 0; i < n; i++)
+        {
+            bool keep = i < protectFirst || cellsPerRep[i] > 0;
+            if (keep)
+            {
+                remap[i] = next++;
+                keptReps.Add(_canonicalClusterReps[i]);
+                keptCrops?.Add(i < _canonicalRepCrops!.Count ? _canonicalRepCrops[i] : null);
+            }
+            else
+            {
+                remap[i] = -1;
+                if (_canonicalRepCrops is not null && i < _canonicalRepCrops.Count)
+                    _canonicalRepCrops[i]?.Dispose();
+            }
+        }
+        if (keptReps.Count == n) return;   // nothing pruned
+
+        for (int i = 0; i < _settledIds.Length; i++)
+            if (_settledIds[i] >= 0 && _settledIds[i] < n)
+                _settledIds[i] = remap[_settledIds[i]];
+
+        ClustererLog.Write($"Pruned {n - keptReps.Count} unused rep(s); canonical {n} -> {keptReps.Count}");
+        _canonicalClusterReps = keptReps;
+        _canonicalRepCrops = keptCrops;
     }
 
     private void CaptureCanonical(CellSignature[] signatures)
@@ -465,7 +543,7 @@ public sealed class CellClusterer
     /// The top-3 keeps a localized difference loud, and still catches a whole-icon color
     /// difference (the flowers) because then every region is high anyway.
     /// </summary>
-    private static double Distance(CellSignature a, CellSignature b)
+    internal static double Distance(CellSignature a, CellSignature b)
     {
         float[] ca = a.Color, cb = b.Color;
         double d0 = 0, d1 = 0, d2 = 0;   // three largest region diffs, descending
@@ -502,8 +580,31 @@ public sealed class CellClusterer
         OpenCvRect safe = ClampRect(inner, bgrFrame.Cols, bgrFrame.Rows);
         if (safe.Width <= 0 || safe.Height <= 0)
             return new CellSignature(new float[StructDim], new float[ColorDim]);
-
         using OpenCvMat crop = new(bgrFrame, safe);
+        return BuildSignature(crop);
+    }
+
+    /// <summary>
+    /// Compute a signature for a standalone image (e.g. a sidebar item icon), cropping its
+    /// centre <paramref name="cropFraction"/> first. Same NCC-structure + LAB-chroma
+    /// signature the board clusterer uses — so a cluster rep and the matching sidebar icon
+    /// (identical artwork) score as a near-perfect match via <see cref="Distance"/>.
+    /// </summary>
+    internal static CellSignature ComputeSignature(OpenCvMat bgr, double cropFraction)
+    {
+        int marginX = (int)(bgr.Cols * (1.0 - cropFraction) / 2.0);
+        int marginY = (int)(bgr.Rows * (1.0 - cropFraction) / 2.0);
+        OpenCvRect inner = new(marginX, marginY, bgr.Cols - 2 * marginX, bgr.Rows - 2 * marginY);
+        OpenCvRect safe = ClampRect(inner, bgr.Cols, bgr.Rows);
+        if (safe.Width <= 0 || safe.Height <= 0)
+            return new CellSignature(new float[StructDim], new float[ColorDim]);
+        using OpenCvMat crop = new(bgr, safe);
+        return BuildSignature(crop);
+    }
+
+    /// <summary>Resize → blur → LAB → structure (NCC-ready) + chroma grid.</summary>
+    private static CellSignature BuildSignature(OpenCvMat crop)
+    {
         using OpenCvMat resized = new();
         Cv2.Resize(crop, resized, new Size(SignatureSize, SignatureSize), 0, 0, InterpolationFlags.Area);
         // Light blur → makes NCC tolerant of a pixel or two of cell-rect drift.
@@ -595,6 +696,39 @@ public sealed class CellClusterer
         catch (Exception ex)
         {
             ClustererLog.Write($"DumpCellCrops failed: {ex.GetType().Name}: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Stash one BGR image crop per cluster — the exact inner-58% crop
+    /// <see cref="ComputeSignature(OpenCvMat, OpenCvRect)"/> consumes — so the labeler can
+    /// show, side by side, the board tile vs the sidebar icon it is being matched against.
+    /// Refreshed every commit; a cluster with no cell on the board this frame keeps the
+    /// crop it had before.
+    /// </summary>
+    private void CaptureRepCrops(OpenCvMat bgrFrame, IReadOnlyList<OpenCvRect> cells, int[] ids)
+    {
+        if (_canonicalClusterReps is null) return;
+        int repCount = _canonicalClusterReps.Count;
+        _canonicalRepCrops ??= new List<OpenCvMat?>();
+        while (_canonicalRepCrops.Count < repCount) _canonicalRepCrops.Add(null);
+
+        for (int c = 0; c < repCount; c++)
+        {
+            // First cell assigned to this cluster — every cell of a cluster is the same item.
+            int cell = -1;
+            for (int i = 0; i < ids.Length && i < cells.Count; i++)
+                if (ids[i] == c) { cell = i; break; }
+            if (cell < 0) continue;   // not on the board this frame — keep the prior crop
+
+            int marginX = (int)(cells[cell].Width * (1.0 - CenterCropFraction) / 2.0);
+            int marginY = (int)(cells[cell].Height * (1.0 - CenterCropFraction) / 2.0);
+            OpenCvRect inner = new(cells[cell].X + marginX, cells[cell].Y + marginY,
+                cells[cell].Width - 2 * marginX, cells[cell].Height - 2 * marginY);
+            OpenCvRect safe = ClampRect(inner, bgrFrame.Cols, bgrFrame.Rows);
+            if (safe.Width <= 0 || safe.Height <= 0) continue;
+            _canonicalRepCrops[c]?.Dispose();
+            _canonicalRepCrops[c] = new OpenCvMat(bgrFrame, safe).Clone();
         }
     }
 
