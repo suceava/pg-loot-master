@@ -10,9 +10,13 @@ it at every checkpoint.
 Project: Gorgon has three Bejeweled-style match-3 minigames at NPC vendors:
 
 - **Loot Master** and **Cashfall** — **identical rules**; this document covers both.
-- **Deluxe** — a third variant, gated behind character level 30. Not yet played, rules
-  unconfirmed, and there is no panel-detection template for it yet. To be documented
-  when it becomes reachable.
+- **Deluxe** ("Lootmaster Deluxe Match-3") — a third variant, gated behind character
+  level 30. Now reachable: panel-detection template added (`panel-title-deluxe.png`)
+  and the board is confirmed a **7×7 grid with the same cell geometry** as Loot Master,
+  so panel detection and board extraction work unchanged (covered by
+  `DeluxePanelTests`). Its sidebar adds **Turns Made** and **Possible Moves** stat rows
+  not present in Loot Master. Match/scoring rules are assumed identical pending
+  in-game confirmation.
 
 ## What the tool optimizes for (the goal)
 
