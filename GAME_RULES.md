@@ -29,8 +29,12 @@ Project: Gorgon has three Bejeweled-style match-3 minigames at NPC vendors:
 - **Target Hunter** is the single deliberate exception: a manual, opt-in strategy. When
   the user specifically wants to capture a particular item, they switch to Target
   Hunter, which sacrifices score to chase that item. It is never the default.
-- The default strategies (**Safe / Cascade Hunter / Speed**) optimize score only and
-  ignore the labeler / capture data entirely. That is correct, not a gap.
+- The default strategies (**Safe / Cascade Hunter / Speed**) currently ignore the
+  labeler / capture data. With the scoring formula now reverse-engineered, we know
+  captures *do* affect per-match score via the bonus tiers — but whether the default
+  strategies leave real score on the table by ignoring capture progression is an
+  **open question, not yet tested**. See [STRATEGIES.md](STRATEGIES.md) for what each
+  strategy is currently testing.
 
 ## Game rules
 
