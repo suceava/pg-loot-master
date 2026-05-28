@@ -44,6 +44,7 @@ public partial class ToolbarWindow : Window
             1 => "CASCADE HUNTER",
             2 => "SPEED",
             3 => "TARGET HUNTER",
+            4 => "EMPIRICAL",
             _ => "?",
         };
     }
@@ -65,6 +66,7 @@ public partial class ToolbarWindow : Window
             CompareCascadeHunterText.Visibility = Visibility.Collapsed;
             CompareSpeedText.Visibility = Visibility.Collapsed;
             CompareTargetHunterText.Visibility = Visibility.Collapsed;
+            CompareEmpiricalText.Visibility = Visibility.Collapsed;
             return;
         }
 
@@ -85,6 +87,10 @@ public partial class ToolbarWindow : Window
             RenderStrategyRow(CompareTargetHunterText, snap.PerStrategy[3], snap.Score);
         else
             CompareTargetHunterText.Visibility = Visibility.Collapsed;
+        if (snap.PerStrategy.Length > 4)
+            RenderStrategyRow(CompareEmpiricalText, snap.PerStrategy[4], snap.Score);
+        else
+            CompareEmpiricalText.Visibility = Visibility.Collapsed;
     }
 
     // Column widths chosen so the longest strategy name ("Cascade Hunter" = 14 chars) and

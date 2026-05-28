@@ -14,7 +14,8 @@ public partial class SettingsWindow : Window
         "Safer picks. Cascade matches contribute less, turn bonuses only count when YOUR swap makes the 4+/5-match. Use when the board is hard to read.",
         "Looks 2 turns ahead via beam search. Heavy cascade weighting (0.85 base × 0.9 decay) and premium on bottom-row swaps (more gravity disruption → more cascade chances). Free turns valued 1.25× normal because each preserved turn = another cascade shot.",
         "Max score per turn, no concern for stretching the game. Quartered 4/5-match turn bonus (free turns matter less as the game drags — point density drops as more item types appear). Lookahead heavily discounted. Bet on scoring big NOW.",
-        "Aggressively prioritizes matches of the item you select in the toolbar (20× multiplier vs 5× baseline). Will sacrifice raw score to capture your target. EXPERIMENTAL — depends on item recognition which can mislabel similar-looking items; double-check the toolbar dropdown shows the right item before relying on this.",
+        "Aggressively prioritizes matches of the item you select in the toolbar (20× multiplier vs 5× baseline). Uses the real per-match scoring formula by variant so the 20× scales actual match values, not the old ad-hoc constants. Will sacrifice raw score to capture your target. EXPERIMENTAL — depends on item recognition; double-check the toolbar dropdown shows the right item before relying on this.",
+        "Real reverse-engineered per-match scoring by variant (Loot Master 2N−3, Deluxe 3N−6; +capture bonus), layered on Cascade Hunter's 2-ply philosophy. Adds a tier-unlock term: a move that pushes the running capture count into a new bonus tier is valued for its permanent uplift on every future match. EXPERIMENTAL — uses item recognition like Target Hunter.",
     };
 
     // Set by App startup so the "Recompute clusters" button can ask the overlay to drop

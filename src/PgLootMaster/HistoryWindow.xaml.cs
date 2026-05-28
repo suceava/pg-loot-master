@@ -10,13 +10,15 @@ namespace PgLootMaster;
 public partial class HistoryWindow : Window
 {
     private readonly GameHistoryStore _store;
-    // Chart palette per strategy: Safe=blue, Cascade Hunter=orange, Speed=green, Target Hunter=magenta.
+    // Chart palette per strategy: Safe=blue, Cascade Hunter=orange, Speed=green,
+    // Target Hunter=magenta, Empirical=cyan.
     private static readonly OxyColor[] StrategyColors = new[]
     {
         OxyColor.FromRgb(80, 160, 255),    // Safe
         OxyColor.FromRgb(255, 160, 60),    // Cascade Hunter
         OxyColor.FromRgb(80, 230, 80),     // Speed
         OxyColor.FromRgb(220, 100, 220),   // Target Hunter
+        OxyColor.FromRgb(80, 220, 220),    // Empirical
     };
     private static readonly OxyColor PlotForeground = OxyColor.FromRgb(220, 220, 220);
     private static readonly OxyColor PlotGridline = OxyColor.FromRgb(60, 60, 60);
@@ -179,7 +181,7 @@ public partial class HistoryWindow : Window
             LegendTextColor = PlotForeground,
         });
 
-        for (int strategy = 0; strategy <= 3; strategy++)
+        for (int strategy = 0; strategy <= 4; strategy++)
         {
             List<GameRecord> games = _store.Games
                 .Where(g => g.Strategy == strategy && g.Turns.Count >= 2 && g.GameStyle == gameFilter)
@@ -305,6 +307,7 @@ public partial class HistoryWindow : Window
         1 => "Cascade Hunter",
         2 => "Speed",
         3 => "Target Hunter",
+        4 => "Empirical",
         _ => "?",
     };
 

@@ -103,18 +103,32 @@ turns (57 clean no-cascade single matches):
   separable.
 
 **Items & capturing**
-- Every tile is an item type. Matching an item's tiles builds that item's running
+- Every tile is an item type. Matching tiles of an item builds its running
   **match count**.
-- When a count crosses the **capture threshold**, that item is **captured** ("yours to
-  keep"). Multiple items can be captured in one game.
-- The threshold is **not shared, and not strictly per-item** — it depends on **capture
-  order**: believed ~30 for the first two captures, then dropping to ~25 (exact sequence
-  to be verified).
-- **Capture does not change the board.** A captured item's tiles stay in play, keep
-  appearing, and **matching them still scores normally**. Capture is purely a counter
-  milestone — captured-item matches are never treated differently.
-- Captured items have a council value — but per the goal above, captures are **not**
-  optimized for.
+- **All matches count** — both the player's direct swap AND any gravity-induced
+  cascade matches add to the relevant items' counts.
+- **One capture at a time, single threshold.** At any moment the game tracks a
+  single **next-capture threshold** `N` (displayed in the sidebar:
+  *"the next item with N matches is yours to keep"*). All non-captured items race
+  against it; **the first to reach `N` captures**, and **every other non-captured
+  item's count resets to 0**. The race then restarts at the next threshold.
+- **Threshold sequence** (`N` by capture order): **`30, 30, 25, 25, …`** for Loot
+  Master / Cashfall — confirmed; stays at 25 after the second capture. Deluxe is
+  assumed identical, pending in-game confirmation.
+- **Simultaneous-capture tiebreak.** If a single swap+cascade pushes two items
+  past `N` in the same turn, the **first-matched** captures; the other resets to
+  0 with everything else. *(Best guess; in-game confirmation pending.)*
+- A captured item is **done** — no count, no number; the sidebar shows a
+  checkmark. It is immune to subsequent captures.
+- **Capture does not change the board.** A captured item's tiles stay in play,
+  keep appearing, and matching them still scores normally (and they still feed
+  the per-match capture-bonus tier counter — see *Scoring* above). Each capture
+  also introduces a new item type to the board, up to a max of 7 — see
+  *Item-type count* below.
+- Captured items have a council value — but per the goal above, captures are
+  **not optimized for as a non-score goal**. (Capture *progression* DOES affect
+  score via the per-match bonus tiers; valuing the next-capture race over the
+  planning horizon is the open question Empirical and Target Hunter address.)
 
 **Item-type count on the board**
 - The board **starts with 4 item types**.
@@ -129,6 +143,9 @@ turns (57 clean no-cascade single matches):
 - **Late-game +2 trigger** — the +2 per-match bonus correlates exactly with
   `prior_captured_count ≥ 2`, but that is confounded with item-type count and game
   progression. Confirm what actually flips it.
-- **Capture threshold sequence** — believed 30, 30, 25, … by capture order; verify.
+- **Deluxe capture-threshold sequence** — assumed identical to Loot Master
+  (`30, 30, 25, …`); confirm.
+- **Simultaneous-capture tiebreak** — if one swap+cascade pushes two items past
+  the threshold in the same turn, the first-matched is assumed to win; verify.
 - Whether **gravity-cascade** matches grant turn bonuses, or only the swap's own matches.
 - Exact turn bonus for two-connected-3-matches.

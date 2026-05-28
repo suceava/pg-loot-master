@@ -243,10 +243,14 @@ public partial class OverlayWindow : Window
                             tSplit = 0;
                             // LabelClusters (cluster→item-name matching) is unreliable, so we
                             // ONLY run it when the user has opted in via the Target Hunter
-                            // strategy OR has the LabelerDebug window open (to measure
-                            // accuracy). Other paths skip it to save CPU.
+                            // strategy, the Empirical strategy (needs TypeId→sidebar count
+                            // mapping for its capture-tier-unlock term), or has the
+                            // LabelerDebug window open (to measure accuracy). Other paths
+                            // skip it to save CPU.
                             bool labelerDebugOpen = OnLabelerDiagnosticsChanged is not null;
-                            if (OverlaySettings.Instance.SolverStrategy == (int)SolverStrategy.TargetHunter
+                            int currentStrategy = OverlaySettings.Instance.SolverStrategy;
+                            if (currentStrategy == (int)SolverStrategy.TargetHunter
+                                || currentStrategy == (int)SolverStrategy.Empirical
                                 || labelerDebugOpen)
                             {
                                 // Signature-based labeling: match each cluster's canonical
@@ -540,52 +544,83 @@ public partial class OverlayWindow : Window
 
     private SolverContext? BuildSolverContext(int[] clusterIds)
     {
-        // Always pass TurnsLeft + Strategy when known, even when there's no target —
-        // they affect general scoring (turn-bonus scaling, cascade aggressiveness).
+        // Always pass TurnsLeft + Strategy + GameStyle when known, even when there's
+        // no target — they affect general scoring (turn-bonus scaling, cascade
+        // aggressiveness, Empirical's variant-aware per-match formula).
         int? turnsLeft = _sidebarReader.TurnsLeft;
         SolverStrategy strategy = (SolverStrategy)OverlaySettings.Instance.SolverStrategy;
+        string? gameStyle = _gameTracker.Active?.GameStyle;
         string? targetName = OverlaySettings.Instance.TargetItemName;
-        if (string.IsNullOrEmpty(targetName))
+        bool needsCaptureData = strategy == SolverStrategy.TargetHunter
+                              || strategy == SolverStrategy.Empirical;
+
+        // Strategies that don't read capture data, with no target picked: minimal
+        // context. Safe / Cascade Hunter / Speed live here.
+        if (!needsCaptureData && string.IsNullOrEmpty(targetName))
         {
-            return new SolverContext { TurnsLeft = turnsLeft, Strategy = strategy };
+            return new SolverContext
+            {
+                TurnsLeft = turnsLeft,
+                Strategy = strategy,
+                GameStyle = gameStyle,
+            };
         }
+
+        // Capture data needed (Target Hunter, Empirical, or user picked a target).
+        // Bail if it isn't available yet.
         if (_latestSidebarItems.Count == 0 || _latestClusterToTemplate.Length == 0) return null;
         if (_sidebarReader.CaptureThreshold is not int threshold) return null;
 
-        // Find the template index whose Name matches the user's target.
-        int targetTemplateIdx = -1;
-        for (int i = 0; i < _latestSidebarItems.Count; i++)
-        {
-            if (_latestSidebarItems[i].Name == targetName)
-            {
-                targetTemplateIdx = i;
-                break;
-            }
-        }
-        if (targetTemplateIdx < 0) return null;
-
-        // Find which cluster id maps to that template.
-        int? targetClusterId = null;
-        for (int c = 0; c < _latestClusterToTemplate.Length; c++)
-        {
-            if (_latestClusterToTemplate[c] == targetTemplateIdx)
-            {
-                targetClusterId = c;
-                break;
-            }
-        }
-        if (targetClusterId is null) return null;
-
-        // Map each cluster id → its template's CaptureCount.
+        // Map each cluster id → its template's CaptureCount; tally captured items.
+        // A captured item's count is frozen at/above threshold by the game — if OCR
+        // failed to read it, force the stored count to `threshold` so the tier-unlock
+        // logic correctly treats it as already-captured (current >= threshold ⇒ skip).
         Dictionary<int, int> counts = new();
+        int capturedCount = 0;
         for (int c = 0; c < _latestClusterToTemplate.Length; c++)
         {
             int t = _latestClusterToTemplate[c];
-            if (t >= 0 && t < _latestSidebarItems.Count
-                && _latestSidebarItems[t].CaptureCount is int count)
+            if (t < 0 || t >= _latestSidebarItems.Count) continue;
+            var item = _latestSidebarItems[t];
+            if (item.CaptureCount is int count)
             {
                 counts[c] = count;
             }
+            else if (item.Captured)
+            {
+                counts[c] = threshold;
+            }
+            if (item.Captured) capturedCount++;
+        }
+
+        // Target Hunter (or user-picked target): resolve the target name to a cluster id.
+        int? targetClusterId = null;
+        if (!string.IsNullOrEmpty(targetName))
+        {
+            int targetTemplateIdx = -1;
+            for (int i = 0; i < _latestSidebarItems.Count; i++)
+            {
+                if (_latestSidebarItems[i].Name == targetName)
+                {
+                    targetTemplateIdx = i;
+                    break;
+                }
+            }
+            if (targetTemplateIdx >= 0)
+            {
+                for (int c = 0; c < _latestClusterToTemplate.Length; c++)
+                {
+                    if (_latestClusterToTemplate[c] == targetTemplateIdx)
+                    {
+                        targetClusterId = c;
+                        break;
+                    }
+                }
+            }
+            // For Target Hunter, an unresolvable target means we can't act on it.
+            // For Empirical (capture data needed but target is optional), fall through
+            // without a target so the tier-unlock term still has the capture data.
+            if (targetClusterId is null && strategy == SolverStrategy.TargetHunter) return null;
         }
 
         return new SolverContext
@@ -595,6 +630,8 @@ public partial class OverlayWindow : Window
             CurrentCounts = counts,
             TurnsLeft = turnsLeft,
             Strategy = strategy,
+            GameStyle = gameStyle,
+            CapturedCount = capturedCount,
         };
     }
 
@@ -1121,6 +1158,7 @@ public partial class OverlayWindow : Window
             PerStrategyFor(active.GameStyle, turn, 1, "Cascade Hunter"),
             PerStrategyFor(active.GameStyle, turn, 2, "Speed"),
             PerStrategyFor(active.GameStyle, turn, 3, "Target Hunter"),
+            PerStrategyFor(active.GameStyle, turn, 4, "Empirical"),
         };
         return new LiveComparisonSnapshot(active.GameStyle, turn, score, active.Strategy, per);
     }

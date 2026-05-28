@@ -70,9 +70,11 @@ public sealed class SidebarReader
     // Icon-blob row scan: a row Y counts as "icon" when at least IconRowMinPixels icon
     // pixels fall in the band [IconBandLeftFromSidebar .. IconRowScanBandRight]; runs
     // shorter than IconRowMinHeight are noise. The scan stops at IconRowScanBottom —
-    // above the dungeon wall visible below the panel — with room for a 7th row.
+    // above the dungeon wall visible below the panel. Bumped from 960 → 985 to fit a
+    // 7-item sidebar where the 7th icon ends ~y=965; the wall starts ~y=972 and would
+    // register as a single 13-row run below the min-height filter, so it's discarded.
     private const int IconRowScanBandRight = 48;
-    private const int IconRowScanBottom = 960;
+    private const int IconRowScanBottom = 985;
     private const int IconRowMinPixels = 8;
     private const int IconRowMinHeight = 20;
 
@@ -482,38 +484,18 @@ public sealed class SidebarReader
         }
         if (runStart >= 0)
             AddSegmentRows(centers, 0, runStart, yBot, IconRowMinHeight, ExpectedRowStride);
-        return RegularizeEvenGrid(centers);
+        return centers;
     }
 
-    /// <summary>
-    /// Snap detected row centres onto the best-fit even-spaced grid (least squares).
-    /// An icon's artwork is not perfectly centred in its bar and IsIconPixel catches a
-    /// dark-heavy icon unevenly, so raw centres jitter; the bars are a perfectly regular
-    /// grid whose stride shrinks as more rows are added. Fitting the grid recovers the
-    /// true per-row centre — and the true stride — at any item count.
-    /// </summary>
-    private static List<int> RegularizeEvenGrid(List<int> centers)
-    {
-        int n = centers.Count;
-        if (n < 3) return centers;
-        centers.Sort();
-        double sk = 0, sc = 0, skk = 0, skc = 0;
-        for (int k = 0; k < n; k++)
-        {
-            sk += k; sc += centers[k];
-            skk += (double)k * k; skc += (double)k * centers[k];
-        }
-        double denom = n * skk - sk * sk;
-        if (denom <= 0) return centers;
-        double stride = (n * skc - sk * sc) / denom;
-        double y0 = (sc - stride * sk) / n;
-        if (stride < ExpectedRowStride * 0.55 || stride > ExpectedRowStride * 1.6)
-            return centers;   // implausible fit — keep the raw centres
-        List<int> grid = new(n);
-        for (int k = 0; k < n; k++)
-            grid.Add((int)Math.Round(y0 + k * stride));
-        return grid;
-    }
+    // NOTE: an earlier version snapped these centres onto a least-squares even-spaced
+    // grid to absorb icon-artwork jitter. That ASSUMED bars are equal height, which
+    // is FALSE — a multi-line name (e.g. "Armor Potion Extreme") makes its bar
+    // visibly taller, so the row stride between items above and below it differs
+    // from the rest. Fitting an even grid through a non-uniform stride pulls every
+    // row off its true centre AND pushes the bottom rows past the scan cutoff,
+    // losing items. Raw run centres are correct (±few px) for every item count
+    // including 7-item full sidebars; the small artwork-centre jitter is well
+    // within the count-crop's 48-px window.
 
     /// <summary>Index of the row centre nearest <paramref name="y"/>, or -1 if none.</summary>
     private static int NearestRowIndex(IReadOnlyList<int> rowCentersY, int y)

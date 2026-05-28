@@ -80,10 +80,15 @@ these strategies reason about, see [GAME_RULES.md](GAME_RULES.md).
 - **Theory:** Heavily multiply the target item's match value and penalize
   matches that would accidentally capture a non-target item, so the solver
   chases the user's chosen item. Trades score for capture specificity.
-- **Implementation:** `Solver.cs` lines 125–134. Mirrors Safe's params except
-  target multiplier is 20× (vs 5× baseline). Capture-steal penalty −1000 if
-  a non-target item would capture this turn. Depends on the Item Matcher
-  (`SignatureLabeler`) being available.
+- **Implementation:** `Solver.cs` lines 125–134. Mirrors Safe's strategic
+  params except target multiplier is 20× (vs 5× baseline). Capture-steal
+  penalty −1000 if a non-target item would capture this turn. Depends on
+  the Item Matcher (`SignatureLabeler`) being available. **Per-match
+  scoring uses the real variant-aware formula** (same branch as Empirical
+  in `ScoreSingleMatch`), so the 20× multiplier and the steal penalty
+  operate against accurate match values — not the inflated 3/50/150
+  ad-hoc constants that would have over-weighted short target matches and
+  under-weighted long ones.
 - **Evidence so far:** *No data* — zero recorded games.
 - **What the formula implies:** With the scoring formula reverse-engineered,
   captures are now also a *score* lever (bonus tiers), not just a non-score
@@ -91,4 +96,44 @@ these strategies reason about, see [GAME_RULES.md](GAME_RULES.md).
   cheapest capture available), so it still sacrifices score-per-effort for
   specificity — but the bonus-tier finding sharpens *why* a capture-aware
   default strategy might also win on score. That is the open question the
-  default strategies don't yet test.
+  default strategies don't yet test. With this round's scoring fix, the
+  20× target preference now operates against the real match-value surface.
+
+## Empirical (experimental)
+
+- **Stated goal:** Top Score.
+- **Theory:** *Capture progression IS scoring — advancing into a new
+  capture-bonus tier permanently raises every future match's score, so a
+  move that unlocks the next tier is worth its immediate points plus the
+  bonus delta over the rest of the game.* The other Top-Score strategies
+  can't see this lever. Variant-aware per-match values come along for free
+  (Deluxe scoring genuinely differs from Loot Master; uniform constants
+  under-weight long Deluxe matches), but the *distinctive* claim — the one
+  no other strategy tests — is the tier-unlock lever.
+- **Implementation:** `Solver.cs` — enum `SolverStrategy.Empirical = 4`;
+  StrategyParams arm inherits Cascade Hunter's strategic parameters verbatim
+  (cascade base 0.85 / decay 0.9, lookahead 0.8, bottom-row 2.0/row, 2-ply
+  beam). The experimental content is two scoring additions:
+  - **`ScoreSingleMatch`** branches on `Strategy == Empirical` and uses
+    the variant-aware formula — Loot Master / Cashfall `2N − 3 + (C≥2 ? 2 : 0)`,
+    Deluxe `3N − 6 + 2·⌈C/2⌉`. Unknown `GameStyle` falls through to today's
+    constants (defensive).
+  - **`ScoreCascade`** adds a tier-unlock term: tally matched tiles per
+    TypeId across the cascade; project newly-captured items; if the
+    resulting capture count crosses into a higher `BonusTier`, add
+    `(tier_delta) × 2 × estAvgMatchesPerTurn × turnsRemaining` to the
+    swap's score. Constants today: `estAvgMatchesPerTurn = 4`,
+    `turnsRemaining = SidebarReader.TurnsLeft ?? 5`.
+  - **Plumbing:** Labeler runs for Empirical too (needs TypeId→sidebar
+    mapping for the tier-unlock projection) — same gate as Target Hunter.
+    `BuildSolverContext` populates `GameStyle`, `CapturedCount`,
+    `CurrentCounts`, `CaptureThreshold` whenever the strategy needs
+    capture data, with or without a user-picked target.
+- **Evidence so far:** *No data yet — strategy just landed.*
+- **What the formula implies:** By construction, Empirical is the formula
+  applied as a scoring strategy. The open question is whether the
+  tier-unlock weighting actually pays off in head-to-head play. Validation
+  plan: 10+ games each of Empirical and Cascade Hunter per variant; if
+  Empirical's median/avg `FinalScore` beats Cascade Hunter's, the
+  tier-unlock lever is real. If it loses or ties, the formula was right
+  about the score surface but tier-unlocks aren't the dominating optimization.

@@ -33,6 +33,7 @@
             <ComboBoxItem Content="Cascade Hunter — 2-turn lookahead, bet on chain reactions" />
             <ComboBoxItem Content="Speed — max score per turn, win fast" />
             <ComboBoxItem Content="Target Hunter — chase your selected sidebar item (experimental)" />
+            <ComboBoxItem Content="Empirical — capture-tier-aware scoring on Cascade Hunter base (experimental)" />
         </ComboBox>
         <TextBlock x:Name="StrategyDescription"
                    Foreground="#FFAAAAAA"
