@@ -85,6 +85,14 @@ public partial class OverlayWindow : Window
     // Previous turn's Target Hunter mode — fed back into DecideTargetMode for hysteresis
     // so the mode doesn't flip every turn. Reset between games / when not hunting.
     private TargetMode? _lastTargetMode;
+    // Live-comparison baseline anchor: the historical-lookup turn is locked in at the
+    // moment the score last changed. Without this, the displayed delta dropped at the end
+    // of every cascade because TurnsMade ticked AFTER the score finished climbing, jumping
+    // the baseline up to the next turn's higher reference. Re-anchors only on the next
+    // score change (start of the next cascade), so the delta you saw during the move stays
+    // put until the next move actually starts.
+    private int? _liveCompScore;
+    private int? _liveCompTurn;
     // Set by the LabelerDebugWindow while it's open so the overlay knows to FORCE
     // LabelClusters to run every frame (normally only Target Hunter runs the labeler).
     // The callback receives the latest diagnostics snapshot or null when labeler didn't run.
@@ -1230,17 +1238,33 @@ public partial class OverlayWindow : Window
     private LiveComparisonSnapshot? BuildLiveSnapshot()
     {
         GameRecord? active = _gameTracker.Active;
-        if (active is null) return null;
+        if (active is null)
+        {
+            _liveCompScore = null;
+            _liveCompTurn = null;
+            return null;
+        }
         if (_sidebarReader.Score is not int score) return null;
         if (_sidebarReader.TurnsMade is not int turn) return null;
 
+        // Re-anchor the comparison baseline only on a score change. Holding it across the
+        // end of a cascade (when TurnsMade ticks but score is stable) prevents the post-
+        // move drop the user could see — the displayed delta sticks at whatever the cascade
+        // ended at until the next move actually scores.
+        if (_liveCompScore != score)
+        {
+            _liveCompScore = score;
+            _liveCompTurn = turn;
+        }
+        int baselineTurn = _liveCompTurn ?? turn;
+
         PerStrategyStats[] per = new[]
         {
-            PerStrategyFor(active.GameStyle, turn, 0, "Safe"),
-            PerStrategyFor(active.GameStyle, turn, 1, "Cascade Hunter"),
-            PerStrategyFor(active.GameStyle, turn, 2, "Speed"),
-            PerStrategyFor(active.GameStyle, turn, 3, "Target Hunter"),
-            PerStrategyFor(active.GameStyle, turn, 4, "Empirical"),
+            PerStrategyFor(active.GameStyle, baselineTurn, 0, "Safe"),
+            PerStrategyFor(active.GameStyle, baselineTurn, 1, "Cascade Hunter"),
+            PerStrategyFor(active.GameStyle, baselineTurn, 2, "Speed"),
+            PerStrategyFor(active.GameStyle, baselineTurn, 3, "Target Hunter"),
+            PerStrategyFor(active.GameStyle, baselineTurn, 4, "Empirical"),
         };
         return new LiveComparisonSnapshot(active.GameStyle, turn, score, active.Strategy, per);
     }
