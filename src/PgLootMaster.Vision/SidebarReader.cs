@@ -221,6 +221,13 @@ public sealed class SidebarReader
             if (line.Bbox.Y < ItemAreaTopInSidebar) continue;          // header region
             if (line.Bbox.X >= CountColumnLeftXInSidebar) continue;    // count column
             if (!line.Text.Any(char.IsLetter)) continue;               // stray digit
+            // Reject OCR fragments whose centre sits in the ICON column. A busy icon (the
+            // cricket especially) is sometimes misread as a few letters ("_ rid") and,
+            // landing near a row centre, gets appended to that item's name. Real names are
+            // centre-justified well right of the icon band (centres ~x=162); an icon
+            // misread's centre falls inside it.
+            int lineCenterX = line.Bbox.X + line.Bbox.Width / 2;
+            if (lineCenterX <= IconBandRightFromSidebar) continue;
             nameLines.Add((sidebarRect.Y + line.Bbox.Y + line.Bbox.Height / 2, line.Text));
         }
 

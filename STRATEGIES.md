@@ -76,28 +76,54 @@ these strategies reason about, see [GAME_RULES.md](GAME_RULES.md).
 
 ## Target Hunter
 
-- **Stated goal:** Capture Item — a specific item the user picks.
-- **Theory:** Heavily multiply the target item's match value and penalize
-  matches that would accidentally capture a non-target item, so the solver
-  chases the user's chosen item. Trades score for capture specificity.
-- **Implementation:** `Solver.cs` lines 125–134. Mirrors Safe's strategic
-  params except target multiplier is 20× (vs 5× baseline). Capture-steal
-  penalty −1000 if a non-target item would capture this turn. Depends on
-  the Item Matcher (`SignatureLabeler`) being available. **Per-match
-  scoring uses the real variant-aware formula** (same branch as Empirical
-  in `ScoreSingleMatch`), so the 20× multiplier and the steal penalty
-  operate against accurate match values — not the inflated 3/50/150
-  ad-hoc constants that would have over-weighted short target matches and
-  under-weighted long ones.
+- **Stated goal:** Capture Item — a specific item the user picks. **Score is
+  explicitly ignored.** Success = the target reaches the threshold and gets
+  captured before the game ends.
+- **Theory (capture race, feasibility-aware):** Capturing the target means
+  getting it to the threshold `N` *first* — the first item to `N` captures and
+  **resets every other non-captured item to 0** (GAME_RULES). So chasing a
+  hopelessly-behind target just *wastes its board tiles*. Each turn the mode is
+  decided by a feasibility check (time-to-capture = `need / board-tiles`, vs the
+  leader and vs turns left):
+  - **RACE** — target can plausibly reach `N` first and in time: advance it;
+    suppress feeding near-`N` competitors; never let one capture (that resets
+    the target). When no target match exists, churn **captured items** (they're
+    race-neutral — their count is frozen) to preserve the target's tiles and
+    feed no competitor.
+  - **FORCE_RESET** — target can't win this round, but a fresh race (full `N`
+    from 0) still fits in the turns left: don't waste the target's tiles; push
+    the leader / accept its capture so the board resets and the target re-races
+    from level ground.
+  - **IDLE** — target is unreachable this game: preserve its tiles, churn
+    captured items (do no harm, bank score). *This is the fix for the "burns the
+    last few target tiles on a lost cause" failure.*
+- **Implementation:** `Solver.cs` — `ScoreCascade` delegates to
+  `ScoreTargetRace` whenever `Strategy == TargetHunter`. `DecideTargetMode`
+  (public, also drives the toolbar mode label) picks RACE/FORCE_RESET/IDLE from
+  `CurrentCounts`, `TilesByType` (board-tile counts), `CaptureThreshold`, and
+  `TurnsLeft`. Objective: `+WIN` if the swap captures the target; in RACE,
+  `Advance × target_tiles` and `−Suppress × competitor_tiles × closeness²` with
+  `−LOSS` on any competitor capture; captured items always score a small
+  positive (preferred neutral churn); in FORCE_RESET, push the leader and
+  *reward* its capture instead. Lookahead disabled (`lookaheadDiscount = 0`).
+- **Identification + lock indicator:** depends on the Item Matcher
+  (`SignatureLabeler`) mapping the target's sidebar item to a board cluster.
+  `BuildSolverContext.ResolveTarget` classifies the lock as **LOCKED**
+  (confident match, `LabelDiagnostics.Confidence ≥ TargetLockMinConfidence`),
+  **LOW-CONFIDENCE** (ambiguous match), or **NOT-ON-BOARD** (name absent /
+  no cluster maps to it). The toolbar shows it (`✓ locked` / `⚠ low-confidence`
+  / `— not on board`) **plus the race mode when locked** (`RACING` /
+  `behind — forcing a reset` / `unreachable — preserving tiles`), so you can see
+  not just *whether* it's locked but *what it's doing about it*. The target is
+  only chased when **LOCKED**; otherwise it safe-stalls rather than confidently
+  hunting the wrong tiles — fixing the old silent-failure mode where a mislabel
+  or missing target produced no feedback.
 - **Evidence so far:** *No data* — zero recorded games.
-- **What the formula implies:** With the scoring formula reverse-engineered,
-  captures are now also a *score* lever (bonus tiers), not just a non-score
-  goal. Target Hunter still pursues a *specific* item (often not the
-  cheapest capture available), so it still sacrifices score-per-effort for
-  specificity — but the bonus-tier finding sharpens *why* a capture-aware
-  default strategy might also win on score. That is the open question the
-  default strategies don't yet test. With this round's scoring fix, the
-  20× target preference now operates against the real match-value surface.
+- **What the formula implies:** N/A — Target Hunter ignores score by design.
+  Its success metric is capture rate, not points; the open question is whether
+  the pure-race objective reliably lands the chosen item before turns run out
+  (the "pure capture, ignore game length" choice risks turn exhaustion when the
+  target is starved of board tiles — see plan's noted risks).
 
 ## Empirical (experimental)
 

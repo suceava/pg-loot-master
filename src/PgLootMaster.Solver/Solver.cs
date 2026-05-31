@@ -85,7 +85,28 @@ public sealed class SolverContext
     /// bonus in <c>Empirical</c>'s per-match formula and the tier-unlock projection.
     /// </summary>
     public int? CapturedCount { get; init; }
+    /// <summary>
+    /// Tiles currently on the board per item TypeId (= cluster id). Bounds how fast an
+    /// item can be matched — Target Hunter's race feasibility uses it to decide whether
+    /// the target can realistically reach the threshold first. Null = unknown.
+    /// </summary>
+    public IReadOnlyDictionary<int, int>? TilesByType { get; init; }
+    /// <summary>
+    /// Pre-decided Target Hunter mode for this turn, with hysteresis already applied by
+    /// the caller (so it doesn't flip every turn). When set, ScoreTargetRace uses it
+    /// instead of recomputing; null → ScoreTargetRace decides fresh (no hysteresis).
+    /// </summary>
+    public TargetMode? DecidedTargetMode { get; set; }
 }
+
+/// <summary>
+/// Target Hunter's per-turn mode. RACE: the target can plausibly reach the threshold
+/// first and in time → advance it. FORCE_RESET: it can't this round, but a fresh race
+/// still fits in the turns left → deliberately let a competitor capture (reset) to
+/// re-race from level ground without wasting the target's tiles. IDLE: the target is
+/// unreachable this game → preserve its tiles, safely churn captured items.
+/// </summary>
+public enum TargetMode { Race, ForceReset, Idle }
 
 public static class Solver
 {
@@ -94,11 +115,24 @@ public static class Solver
     private const double FourMatchTurnBonus = 200.0;
     private const double FiveMatchTurnBonus = 500.0;
     private const double TargetMultiplier = 5.0;
-    // Dominates ranking when the target captures this turn (mission accomplished).
-    private const double TargetCaptureReward = 5000.0;
-    // Estimated per-tile match value used to convert "lost target progress in tiles"
-    // into a reset-cost when a non-target captures and resets the target's count.
-    private const double LostProgressPerTileEstimate = 3.0;
+    // Target Hunter pure-race objective weights (see ScoreTargetRace). ScoreTargetRace
+    // is the ONLY scorer for that strategy, so these need only be internally consistent.
+    private const double TargetRaceWin = 1_000_000.0;     // target reaches threshold this turn
+    private const double TargetRaceLoss = 1_000_000.0;    // a non-target captures → target resets
+    private const double TargetRaceForceReset = 100_000.0;// SALVAGE: accept a competitor's capture to reset
+    private const double TargetRaceAdvance = 100.0;       // RACE: per target tile matched
+    private const double TargetRacePreserve = 100.0;      // SALVAGE: per target tile penalty (don't waste them)
+    private const double TargetRaceCapturedBonus = 20.0;  // per captured-item tile (race-neutral safe churn)
+    private const double TargetRaceSuppress = 100.0;      // RACE/IDLE: per competitor tile × closeness²
+    private const double TargetRacePush = 100.0;          // FORCE_RESET: per leader tile × closeness
+    // Feasibility tuning. The expected target matches/turn scales with how many of the
+    // item's tiles are on the board (few tiles ⇒ slow), capped by a per-turn ceiling
+    // (you can't match more than ~this regardless). turns-to-capture = need / rate.
+    private const double TargetRaceRateCeiling = 5.0;  // max tiles of one item matchable per turn
+    private const double TargetRaceTilesToRate = 0.4;  // per board-tile contribution to that rate (cap ~12 tiles)
+    private const double TargetRaceMargin = 1.3;       // ENTER race: target finishes within 1.3× the leader's turns
+    private const double TargetRaceStayMargin = 1.5;   // STAY in race until 1.5× — modest hysteresis (absorb noise, drop clear losers)
+    private const double TargetRaceResetImminentTurns = 3.0; // only FORCE_RESET if a competitor will capture within ~this many turns
 
     // Strategy-dependent constants. Picked per-call from SolverContext.Strategy.
     //
@@ -145,14 +179,16 @@ public static class Solver
                 fiveMatchTurnBonus: FiveMatchTurnBonus * 0.25,
                 secondPlyDiscount: 0.0,
                 targetMultiplier: TargetMultiplier),
-            // Target Hunter: mirrors Safe's scoring but with a 4× target multiplier (20×
-            // vs 5× baseline). Only fires when SolverContext.TargetTypeId is set.
+            // Target Hunter: scores via the pure-race ScoreTargetRace, so the cascade /
+            // turn-bonus / target-multiplier params here are unused. Only lookaheadDiscount
+            // is read (in FindBestSwap) — 0 disables lookahead, which the immediate
+            // race objective doesn't benefit from.
             SolverStrategy.TargetHunter => (
                 cascadeStepBase: 0.3,
                 cascadeStepDecay: 0.7,
                 turnBonusAllSteps: false,
                 bottomBonusPerRow: 0.5,
-                lookaheadDiscount: 0.3,
+                lookaheadDiscount: 0.0,
                 fourMatchTurnBonus: FourMatchTurnBonus,
                 fiveMatchTurnBonus: FiveMatchTurnBonus,
                 secondPlyDiscount: 0.0,
@@ -193,12 +229,6 @@ public static class Solver
         SolverStrategy strategy = context?.Strategy ?? SolverStrategy.Safe;
         var sp = StrategyParams(strategy);
         bool useTwoPly = sp.secondPlyDiscount > 0;
-        // Per-item tiles currently on the board. Feeds Target Hunter's race-aware
-        // multiplier (and is reusable for any future strategy needing per-item board
-        // shape). Computed once for the START-of-turn board and reused across the
-        // 1-ply and 2-ply lookahead — slight inaccuracy in lookahead vs recomputing
-        // per level, but lookahead is already discounted; cheap to compute (49 cells).
-        IReadOnlyDictionary<int, int> tilesByType = CountTilesByType(board);
 
         List<SwapRecommendation> all = new();
         foreach (Swap swap in Swap.AllAdjacent())
@@ -206,14 +236,14 @@ public static class Solver
             CascadeResult result = CascadeSimulator.Resolve(board, swap);
             if (!result.SwapLegal) continue;
 
-            double immediateScore = ScoreCascade(result, context, tilesByType);
+            double immediateScore = ScoreCascade(result, context);
 
             double lookaheadScore = 0;
-            if (result.FinalBoard is not null)
+            if (result.FinalBoard is not null && sp.lookaheadDiscount > 0)
             {
                 if (useTwoPly)
                 {
-                    lookaheadScore = ComputeTwoPlyLookahead(result.FinalBoard, context, sp.secondPlyDiscount, tilesByType);
+                    lookaheadScore = ComputeTwoPlyLookahead(result.FinalBoard, context, sp.secondPlyDiscount);
                 }
                 else
                 {
@@ -221,7 +251,7 @@ public static class Solver
                     {
                         CascadeResult nextResult = CascadeSimulator.Resolve(result.FinalBoard, nextSwap);
                         if (!nextResult.SwapLegal) continue;
-                        double nextScore = ScoreCascade(nextResult, context, tilesByType);
+                        double nextScore = ScoreCascade(nextResult, context);
                         if (nextScore > lookaheadScore) lookaheadScore = nextScore;
                     }
                 }
@@ -242,18 +272,15 @@ public static class Solver
     /// Returns max over beam members of (level1 score + secondPlyDiscount × best level2 score).
     /// </summary>
     private static double ComputeTwoPlyLookahead(Board level1Board, SolverContext? context,
-        double secondPlyDiscount, IReadOnlyDictionary<int, int>? tilesByType)
+        double secondPlyDiscount)
     {
         // Collect (score, post-cascade board) for every legal swap on level1Board.
-        // Note: tilesByType is the OUTER board's; using it inside lookahead is a
-        // heuristic approximation — recomputing per level is too costly given the
-        // beam fan-out, and lookahead is already discounted.
         List<(double s1, Board fb1)> level1 = new();
         foreach (Swap n in Swap.AllAdjacent())
         {
             CascadeResult r1 = CascadeSimulator.Resolve(level1Board, n);
             if (!r1.SwapLegal || r1.FinalBoard is null) continue;
-            level1.Add((ScoreCascade(r1, context, tilesByType), r1.FinalBoard));
+            level1.Add((ScoreCascade(r1, context), r1.FinalBoard));
         }
         if (level1.Count == 0) return 0;
         level1.Sort((a, b) => b.s1.CompareTo(a.s1));
@@ -268,7 +295,7 @@ public static class Solver
             {
                 CascadeResult r2 = CascadeSimulator.Resolve(fb1, n2);
                 if (!r2.SwapLegal) continue;
-                double s2 = ScoreCascade(r2, context, tilesByType);
+                double s2 = ScoreCascade(r2, context);
                 if (s2 > bestS2) bestS2 = s2;
             }
             double combined = s1 + secondPlyDiscount * bestS2;
@@ -279,9 +306,12 @@ public static class Solver
 
     public static SwapRecommendation? FindBestSwap(Board board) => FindBestSwap(board, out _);
 
-    public static double ScoreCascade(CascadeResult result, SolverContext? context = null,
-        IReadOnlyDictionary<int, int>? tilesByType = null)
+    public static double ScoreCascade(CascadeResult result, SolverContext? context = null)
     {
+        // Target Hunter optimises a pure capture-RACE objective, not score — delegate.
+        if (context?.Strategy == SolverStrategy.TargetHunter)
+            return ScoreTargetRace(result, context);
+
         double score = 0;
         bool anyStepHasFour = false;
         bool anyStepHasFive = false;
@@ -292,35 +322,14 @@ public static class Solver
          double targetMult) =
             StrategyParams(context?.Strategy ?? SolverStrategy.Safe);
 
-        // Track per-typeId match-cell counts across the whole cascade. Used by:
-        //  - Target Hunter's steal-penalty (a non-target item capturing this turn).
-        //  - Empirical's tier-unlock term (any item that captures this turn may push
-        //    the running capture count into a new bonus tier).
+        // Per-typeId matched-cell counts across the cascade — only Empirical needs them
+        // (its tier-unlock term). Target Hunter does its own tally in ScoreTargetRace.
         Dictionary<int, int>? matchedCellsByType = null;
-        bool needTargetTracking = context?.TargetTypeId is not null && context.CaptureThreshold is not null;
-        bool needEmpiricalTracking = context?.Strategy == SolverStrategy.Empirical
+        if (context?.Strategy == SolverStrategy.Empirical
             && context.CaptureThreshold is not null
-            && context.CurrentCounts is not null;
-        if (needTargetTracking || needEmpiricalTracking)
+            && context.CurrentCounts is not null)
         {
             matchedCellsByType = new Dictionary<int, int>();
-        }
-
-        // Target Hunter — race-aware target multiplier. P(target wins the next capture
-        // race) from current counts AND per-item board-tile availability. Captures
-        // the "target at 18/30 with 20 tiles" vs "X at 25/30 with 5 tiles" intuition:
-        // tile availability bounds the match-rate, not just the distance to threshold.
-        // Captured items reset every other non-captured item's count to 0 (GAME_RULES),
-        // so matching the target when a non-target is set to capture first is wasted.
-        double pTargetWins = 1.0;
-        if (context?.Strategy == SolverStrategy.TargetHunter
-            && context.TargetTypeId is int targetForRace
-            && context.CaptureThreshold is int captureNForRace
-            && context.CurrentCounts is not null
-            && tilesByType is not null)
-        {
-            pTargetWins = ComputeTargetRaceProbability(
-                targetForRace, captureNForRace, context.CurrentCounts, tilesByType);
         }
 
         for (int stepIdx = 0; stepIdx < result.Steps.Count; stepIdx++)
@@ -330,12 +339,12 @@ public static class Solver
             foreach (Match m in step)
             {
                 double matchScore = ScoreSingleMatch(m, bottomBonusPerRow, context);
-                // Apply per-strategy target multiplier when the match is of the target.
-                // For Target Hunter, scale by pTargetWins — if a non-target is set to
-                // win the next race, target-tile matches are wasted (will reset to 0).
+                // Per-strategy target multiplier when the match is of a user-picked
+                // target (a mild lean for non-Target-Hunter strategies; Target Hunter
+                // itself never reaches here — it scores via ScoreTargetRace).
                 if (context?.TargetTypeId is int targetTypeId && m.Tile.TypeId == targetTypeId)
                 {
-                    matchScore *= targetMult * pTargetWins;
+                    matchScore *= targetMult;
                 }
                 score += matchScore * stepWeight;
 
@@ -372,46 +381,6 @@ public static class Solver
         if (anyStepHasFive) score += fiveMatchBonus * turnUrgencyMultiplier;
         else if (anyStepHasFour) score += fourMatchBonus * turnUrgencyMultiplier;
 
-        // Target Hunter capture analysis. Replaces the old flat -1000 steal penalty
-        // with two more accurate signals:
-        //  - TARGET captures this turn → mission accomplished; add a big reward so
-        //    this dominates the ranking.
-        //  - A NON-TARGET captures this turn → target's progress resets to 0 (per
-        //    GAME_RULES capture-reset mechanic). Cost is PROPORTIONAL to the lost
-        //    target progress, not a flat constant: losing 1/30 hurts very little,
-        //    losing 25/30 hurts a lot.
-        if (context?.Strategy == SolverStrategy.TargetHunter
-            && matchedCellsByType is not null
-            && context.TargetTypeId is int thTarget
-            && context.CaptureThreshold is int thN
-            && context.CurrentCounts is not null)
-        {
-            context.CurrentCounts.TryGetValue(thTarget, out int targetCurrent);
-            matchedCellsByType.TryGetValue(thTarget, out int targetMatched);
-            bool targetCaptures = targetCurrent + targetMatched >= thN;
-
-            bool nonTargetCaptures = false;
-            foreach (KeyValuePair<int, int> kv in matchedCellsByType)
-            {
-                if (kv.Key == thTarget) continue;
-                context.CurrentCounts.TryGetValue(kv.Key, out int currentCount);
-                if (currentCount >= thN) continue;        // already captured (count frozen)
-                if (currentCount + kv.Value >= thN) { nonTargetCaptures = true; break; }
-            }
-
-            if (targetCaptures)
-            {
-                score += TargetCaptureReward;
-            }
-            else if (nonTargetCaptures)
-            {
-                // Reset cost = lost target progress × target multiplier × per-tile
-                // value estimate. Subtracts ~0 when target is fresh, scales linearly
-                // up to ~ targetMult × (N-1) × per-tile when target was near capture.
-                score -= targetCurrent * targetMult * LostProgressPerTileEstimate;
-            }
-        }
-
         // Empirical tier-unlock: a move that captures items this turn may push the
         // running capture count C into a new bonus tier, which permanently raises
         // every future match's score by +2 per tier-step. Value that future uplift
@@ -447,84 +416,165 @@ public static class Solver
         return score;
     }
 
+    /// <summary>Target Hunter feasibility readout: the decided mode plus the estimated
+    /// turns-to-capture for the target and the fastest competitor (for the lock line).</summary>
+    public readonly record struct TargetRaceAssessment(TargetMode Mode, double TargetTurns, double LeaderTurns);
+
     /// <summary>
-    /// Count tiles per TypeId on the board (Target Hunter's race math needs to know
-    /// how many tiles of each item are available to match, not just the count toward
-    /// threshold). Cheap — 49 cells.
+    /// Thin wrapper — see <see cref="AssessTargetRace"/>.
     /// </summary>
-    private static Dictionary<int, int> CountTilesByType(Board board)
+    public static TargetMode DecideTargetMode(SolverContext context, TargetMode? previous = null)
+        => AssessTargetRace(context, previous).Mode;
+
+    /// <summary>
+    /// Decide the Target Hunter mode and report the turn estimates behind it. The first
+    /// item to the threshold captures and resets all others to 0, so chasing a
+    /// hopelessly-behind target just wastes its tiles. turns-to-capture =
+    /// need / rate(board-tiles), where rate scales with how many of the item's tiles are
+    /// on the board (few tiles ⇒ slow) up to a per-turn ceiling — so a competitor with
+    /// lots of tiles is correctly a fast threat (it ticks up via inevitable incidental
+    /// matches). RACE: target finishes within <see cref="TargetRaceMargin"/> of the
+    /// leader and in the turns left (hysteresis widens the *leave* threshold). FORCE_RESET:
+    /// can't this round but a competitor will capture imminently anyway (reset is coming —
+    /// take it) and a fresh race fits. IDLE: target unreachable / no imminent reset —
+    /// preserve its tiles and wait for the board to favour it.
+    /// </summary>
+    public static TargetRaceAssessment AssessTargetRace(SolverContext context, TargetMode? previous = null)
     {
-        Dictionary<int, int> tiles = new();
-        for (int r = 0; r < Board.Dim; r++)
+        if (context.TargetTypeId is not int target || context.CaptureThreshold is not int n
+            || context.CurrentCounts is null)
+            return new(TargetMode.Idle, double.PositiveInfinity, double.PositiveInfinity);
+        IReadOnlyDictionary<int, int> counts = context.CurrentCounts;
+        IReadOnlyDictionary<int, int>? tiles = context.TilesByType;
+        if (tiles is null) return new(TargetMode.Race, 0, double.PositiveInfinity);  // no board-shape data
+
+        counts.TryGetValue(target, out int tc);
+        if (tc >= n) return new(TargetMode.Idle, 0, double.PositiveInfinity);        // already captured
+        double targetTurns = TurnsToCapture(n - tc, TilesOf(tiles, target));
+
+        // Fastest live competitor.
+        double leaderTurns = double.PositiveInfinity;
+        foreach (KeyValuePair<int, int> kv in counts)
         {
-            for (int c = 0; c < Board.Dim; c++)
+            if (kv.Key == target || kv.Value >= n) continue;
+            double t = TurnsToCapture(n - kv.Value, TilesOf(tiles, kv.Key));
+            if (t < leaderTurns) leaderTurns = t;
+        }
+
+        int turnsLeft = context.TurnsLeft ?? 99;
+        // Hysteresis: harder to LEAVE race than enter, so a noisy board-tile count near
+        // the boundary doesn't flip the mode — but the band is narrow (1.3→1.5) so a
+        // target that's clearly behind (e.g. 0 count + few tiles) still drops out.
+        double margin = previous == TargetMode.Race ? TargetRaceStayMargin : TargetRaceMargin;
+        bool turnsOk = targetTurns <= turnsLeft;
+        bool aheadOfField = targetTurns <= leaderTurns * margin;
+
+        TargetMode mode;
+        if (turnsOk && aheadOfField) mode = TargetMode.Race;
+        else if (leaderTurns <= TargetRaceResetImminentTurns
+                 && TurnsToCapture(n, TilesOf(tiles, target)) <= turnsLeft)
+            mode = TargetMode.ForceReset;   // a reset is coming regardless — take it, then re-race
+        else mode = TargetMode.Idle;        // unreachable / no imminent reset — preserve tiles, wait
+
+        return new(mode, targetTurns, leaderTurns);
+    }
+
+    private static double TurnsToCapture(int need, int boardTiles)
+    {
+        double rate = Math.Min(TargetRaceRateCeiling, boardTiles * TargetRaceTilesToRate);
+        return rate > 0 ? need / rate : double.PositiveInfinity;
+    }
+
+    private static int TilesOf(IReadOnlyDictionary<int, int> tiles, int type) =>
+        tiles.TryGetValue(type, out int v) ? v : 0;
+
+    /// <summary>
+    /// Target Hunter's capture-race objective (score is intentionally ignored). Mode comes
+    /// from <see cref="DecideTargetMode"/>:
+    ///  - Always +WIN if this swap takes the target to the threshold.
+    ///  - RACE: advance the target; suppress feeding near-threshold competitors; never let
+    ///    a competitor capture (that resets the target). Captured items are race-neutral —
+    ///    a small positive, so when no target match exists it churns *those* to keep
+    ///    the target's tiles and feed nobody.
+    ///  - FORCE_RESET: don't waste target tiles; push the leader / accept its capture so the
+    ///    board resets and the target re-races from 0.
+    ///  - IDLE: preserve target tiles, prefer captured-item churn — the target's lost, so
+    ///    do no harm and bank score.
+    /// </summary>
+    private static double ScoreTargetRace(CascadeResult result, SolverContext context)
+    {
+        if (context.CaptureThreshold is not int n || context.CurrentCounts is null) return 0;
+        IReadOnlyDictionary<int, int> counts = context.CurrentCounts;
+        int target = context.TargetTypeId ?? -1;
+        Dictionary<int, int> matched = TallyMatchedCellsByType(result);
+
+        // Capturing the target is always the best outcome, in any mode.
+        if (target >= 0)
+        {
+            counts.TryGetValue(target, out int tc);
+            matched.TryGetValue(target, out int tm);
+            if (tc < n && tc + tm >= n) return TargetRaceWin;
+        }
+
+        TargetMode mode = context.DecidedTargetMode ?? DecideTargetMode(context);
+        double value = 0;
+        foreach (KeyValuePair<int, int> kv in matched)
+        {
+            int type = kv.Key, tiles = kv.Value;
+            counts.TryGetValue(type, out int c);
+
+            if (type == target)
             {
-                int t = board[r, c].TypeId;
-                if (t < 0) continue;
-                tiles.TryGetValue(t, out int count);
-                tiles[t] = count + 1;
+                value += mode == TargetMode.Race ? TargetRaceAdvance * tiles
+                                                 : -TargetRacePreserve * tiles;
+            }
+            else if (c >= n)                                   // captured — race-neutral safe tiles
+            {
+                value += TargetRaceCapturedBonus * tiles;
+            }
+            else if (c + tiles >= n)                           // this competitor would capture this turn
+            {
+                if (mode == TargetMode.ForceReset) value += TargetRaceForceReset;  // we want the reset
+                else return -TargetRaceLoss;                   // RACE/IDLE: never reset the target
+            }
+            else                                               // feeding a live competitor
+            {
+                double closeness = (double)c / n;
+                value += mode == TargetMode.ForceReset
+                    ? TargetRacePush * tiles * closeness                   // push the leader toward capture
+                    : -TargetRaceSuppress * tiles * closeness * closeness; // suppress
             }
         }
-        return tiles;
+        return value;
     }
 
-    /// <summary>
-    /// P(target wins the next capture race) ∈ [0, 1]. Uses both per-item current
-    /// counts (distance to threshold) AND per-item board-tile availability (bound
-    /// on per-turn match rate). An item with 0 tiles on the board can't race; an
-    /// item close to threshold with lots of tiles wins quickly.
-    ///
-    /// Time-to-capture model: `tta(T) = (N − count[T]) / max(1, tilesByType[T])`.
-    /// P(target wins) = `threat_tta / (target_tta + threat_tta)` — symmetric race,
-    /// 1 when target is far ahead, 0 when it's hopeless.
-    /// </summary>
-    private static double ComputeTargetRaceProbability(int targetTypeId, int threshold,
-        IReadOnlyDictionary<int, int> currentCounts, IReadOnlyDictionary<int, int> tilesByType)
+    /// <summary>Tiles matched per TypeId across the whole cascade (all steps).</summary>
+    private static Dictionary<int, int> TallyMatchedCellsByType(CascadeResult result)
     {
-        currentCounts.TryGetValue(targetTypeId, out int targetCount);
-        if (targetCount >= threshold) return 1.0;
-        tilesByType.TryGetValue(targetTypeId, out int targetBoardTiles);
-        double targetTta = TimeToCapture(threshold - targetCount, targetBoardTiles);
-
-        // Closest non-captured non-target threat.
-        double threatTta = double.PositiveInfinity;
-        foreach (KeyValuePair<int, int> kv in currentCounts)
+        Dictionary<int, int> matched = new();
+        foreach (IReadOnlyList<Match> step in result.Steps)
         {
-            if (kv.Key == targetTypeId) continue;
-            if (kv.Value >= threshold) continue;        // already captured (frozen)
-            tilesByType.TryGetValue(kv.Key, out int boardTiles);
-            double tta = TimeToCapture(threshold - kv.Value, boardTiles);
-            if (tta < threatTta) threatTta = tta;
+            foreach (Match m in step)
+            {
+                matched.TryGetValue(m.Tile.TypeId, out int prev);
+                matched[m.Tile.TypeId] = prev + m.Length;
+            }
         }
-
-        if (double.IsPositiveInfinity(targetTta) && double.IsPositiveInfinity(threatTta)) return 0.5;
-        if (double.IsPositiveInfinity(targetTta)) return 0.0;   // target can't race
-        if (double.IsPositiveInfinity(threatTta)) return 1.0;   // no live threat
-        return threatTta / (targetTta + threatTta);
-    }
-
-    private static double TimeToCapture(int distance, int boardTiles)
-    {
-        if (boardTiles <= 0) return double.PositiveInfinity;
-        return (double)distance / boardTiles;
+        return matched;
     }
 
     private static double ScoreSingleMatch(Match m, double bottomBonusPerRow, SolverContext? context)
     {
-        // Empirical and Target Hunter use the reverse-engineered per-variant base
-        // score: Loot Master / Cashfall = 2N − 3 + (+2 once C≥2); Deluxe = 3N − 6 +
-        // 2·⌈C/2⌉ (never caps). Target Hunter needs the real values so its 20×
-        // target multiplier scales the *actual* match value, not the inflated 150
-        // ad-hoc 5-match constant (which would over-weight short target matches and
-        // under-weight long ones).
+        // Empirical uses the reverse-engineered per-variant base score: Loot Master /
+        // Cashfall = 2N − 3 + (+2 once C≥2); Deluxe = 3N − 6 + 2·⌈C/2⌉ (never caps).
+        // (Target Hunter never reaches here — it scores via ScoreTargetRace.)
         //
-        // All other strategies — and either of these two with an unknown GameStyle —
-        // keep the existing ad-hoc constants. The 4/5-match inflation there encodes
-        // the value of the +turns those matches grant; replacing it with a
-        // principled turns_granted × turn_EV is a separate follow-up.
+        // All other strategies — and Empirical with an unknown GameStyle — keep the
+        // existing ad-hoc constants. The 4/5-match inflation there encodes the value
+        // of the +turns those matches grant; replacing it with a principled
+        // turns_granted × turn_EV is a separate follow-up.
         double baseScore;
-        bool useRealFormula = context?.Strategy is SolverStrategy.Empirical
-                                                or SolverStrategy.TargetHunter;
+        bool useRealFormula = context?.Strategy == SolverStrategy.Empirical;
         if (useRealFormula && context!.GameStyle is string style)
         {
             int c = context.CapturedCount ?? 0;

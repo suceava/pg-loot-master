@@ -72,6 +72,19 @@ public partial class OverlayWindow : Window
     // Set by App.OnStartup so the overlay can push live-comparison snapshots to the toolbar
     // without holding a direct reference to ToolbarWindow. Null = no active game / no history.
     public Action<LiveComparisonSnapshot?>? OnLiveComparisonChanged { get; set; }
+    // Set by App.OnStartup so the overlay can push the Target Hunter lock status to the
+    // toolbar: (lock status, target name, mode detail e.g. "RACING" / null).
+    public Action<TargetLockStatus, string?, string?>? OnTargetLockChanged { get; set; }
+    // Labeler confidence (best-vs-runner-up) below this ⇒ the target match is too
+    // ambiguous to trust → LOW-CONFIDENCE (don't chase it). Tunable; tighten if the
+    // hunter locks onto wrong tiles, loosen if it too often reports low-confidence.
+    private const double TargetLockMinConfidence = 0.05;
+    private TargetLockStatus _lastPushedLock = (TargetLockStatus)(-1);
+    private string? _lastPushedLockName;
+    private string? _lastPushedLockMode;
+    // Previous turn's Target Hunter mode — fed back into DecideTargetMode for hysteresis
+    // so the mode doesn't flip every turn. Reset between games / when not hunting.
+    private TargetMode? _lastTargetMode;
     // Set by the LabelerDebugWindow while it's open so the overlay knows to FORCE
     // LabelClusters to run every frame (normally only Target Hunter runs the labeler).
     // The callback receives the latest diagnostics snapshot or null when labeler didn't run.
@@ -450,6 +463,10 @@ public partial class OverlayWindow : Window
         // debug status box visibility.
         LiveComparisonSnapshot? liveSnap = BuildLiveSnapshot();
         Dispatcher.BeginInvoke(() => OnLiveComparisonChanged?.Invoke(liveSnap));
+        // No active game → clear the Target Hunter lock indicator too, so it doesn't
+        // linger after the game ends (mirrors the live text hiding). During a game the
+        // BuildSolverContext push governs it; this only fires when there's no game.
+        if (liveSnap is null) { PushTargetLock(TargetLockStatus.None, null, null); _lastTargetMode = null; }
 
         long tBeforeDispatch = sw.ElapsedMilliseconds;
         Dispatcher.Invoke(() =>
@@ -554,10 +571,15 @@ public partial class OverlayWindow : Window
         bool needsCaptureData = strategy == SolverStrategy.TargetHunter
                               || strategy == SolverStrategy.Empirical;
 
+        // Resolve the chosen target to a board cluster + a lock-confidence status.
+        (int? targetClusterId, TargetLockStatus lockStatus) = ResolveTarget(targetName);
+        bool hunting = strategy == SolverStrategy.TargetHunter;
+
         // Strategies that don't read capture data, with no target picked: minimal
         // context. Safe / Cascade Hunter / Speed live here.
         if (!needsCaptureData && string.IsNullOrEmpty(targetName))
         {
+            PushTargetLock(TargetLockStatus.None, null, null);
             return new SolverContext
             {
                 TurnsLeft = turnsLeft,
@@ -568,8 +590,12 @@ public partial class OverlayWindow : Window
 
         // Capture data needed (Target Hunter, Empirical, or user picked a target).
         // Bail if it isn't available yet.
-        if (_latestSidebarItems.Count == 0 || _latestClusterToTemplate.Length == 0) return null;
-        if (_sidebarReader.CaptureThreshold is not int threshold) return null;
+        if (_latestSidebarItems.Count == 0 || _latestClusterToTemplate.Length == 0
+            || _sidebarReader.CaptureThreshold is not int threshold)
+        {
+            PushTargetLock(hunting ? lockStatus : TargetLockStatus.None, targetName, null);
+            return null;
+        }
 
         // Map each cluster id → its template's CaptureCount; tally captured items.
         // A captured item's count is frozen at/above threshold by the game — if OCR
@@ -593,46 +619,102 @@ public partial class OverlayWindow : Window
             if (item.Captured) capturedCount++;
         }
 
-        // Target Hunter (or user-picked target): resolve the target name to a cluster id.
-        int? targetClusterId = null;
-        if (!string.IsNullOrEmpty(targetName))
+        // Tiles on the board per cluster id — Target Hunter's race feasibility resource.
+        Dictionary<int, int> tilesByCluster = new();
+        foreach (int cid in clusterIds)
         {
-            int targetTemplateIdx = -1;
-            for (int i = 0; i < _latestSidebarItems.Count; i++)
-            {
-                if (_latestSidebarItems[i].Name == targetName)
-                {
-                    targetTemplateIdx = i;
-                    break;
-                }
-            }
-            if (targetTemplateIdx >= 0)
-            {
-                for (int c = 0; c < _latestClusterToTemplate.Length; c++)
-                {
-                    if (_latestClusterToTemplate[c] == targetTemplateIdx)
-                    {
-                        targetClusterId = c;
-                        break;
-                    }
-                }
-            }
-            // For Target Hunter, an unresolvable target means we can't act on it.
-            // For Empirical (capture data needed but target is optional), fall through
-            // without a target so the tier-unlock term still has the capture data.
-            if (targetClusterId is null && strategy == SolverStrategy.TargetHunter) return null;
+            if (cid < 0) continue;
+            tilesByCluster.TryGetValue(cid, out int v);
+            tilesByCluster[cid] = v + 1;
         }
 
-        return new SolverContext
+        // Target Hunter only chases the target when it's confidently LOCKED; otherwise
+        // it runs the race objective with no target (safe-stall / suppression). Other
+        // strategies take the cluster as a mild lean regardless.
+        int? effectiveTarget = targetClusterId;
+        if (hunting && lockStatus != TargetLockStatus.Locked)
+            effectiveTarget = null;
+
+        var context = new SolverContext
         {
-            TargetTypeId = targetClusterId,
+            TargetTypeId = effectiveTarget,
             CaptureThreshold = threshold,
             CurrentCounts = counts,
+            TilesByType = tilesByCluster,
             TurnsLeft = turnsLeft,
             Strategy = strategy,
             GameStyle = gameStyle,
             CapturedCount = capturedCount,
         };
+
+        // Decide the race mode ONCE per turn, with hysteresis vs last turn's mode so it
+        // doesn't flip-flop. Store it on the context so the scorer and the indicator agree.
+        TargetMode? mode = null;
+        string? modeText = null;
+        if (hunting && effectiveTarget is not null)
+        {
+            var assess = PgLootMaster.Solver.Solver.AssessTargetRace(context, _lastTargetMode);
+            mode = assess.Mode;
+            context.DecidedTargetMode = mode;
+            modeText = ModeLabel(assess);
+        }
+        _lastTargetMode = mode;   // null when not actively hunting → next lock starts fresh
+        PushTargetLock(hunting ? lockStatus : TargetLockStatus.None, targetName, modeText);
+
+        return context;
+    }
+
+    private static string ModeLabel(PgLootMaster.Solver.Solver.TargetRaceAssessment a)
+    {
+        string Turns(double t) => double.IsInfinity(t) ? "∞" : $"{t:0}t";
+        string nums = $" (you {Turns(a.TargetTurns)} vs best {Turns(a.LeaderTurns)})";
+        return a.Mode switch
+        {
+            TargetMode.Race => "RACING" + nums,
+            TargetMode.ForceReset => "behind — forcing a reset" + nums,
+            _ => "unreachable — preserving tiles" + nums,
+        };
+    }
+
+    /// <summary>
+    /// Resolve the chosen target item name → its board cluster id, plus a lock-status
+    /// classification. NOT-ON-BOARD = name absent from the sidebar this frame, or the
+    /// labeler mapped no cluster to it (its tiles aren't detected / it's captured).
+    /// LOW-CONFIDENCE = a cluster maps to it but the labeler's best-vs-runner-up gap is
+    /// below <see cref="TargetLockMinConfidence"/>. LOCKED = a confident match.
+    /// </summary>
+    private (int? clusterId, TargetLockStatus status) ResolveTarget(string? targetName)
+    {
+        if (string.IsNullOrEmpty(targetName)) return (null, TargetLockStatus.None);
+        if (_latestSidebarItems.Count == 0 || _latestClusterToTemplate.Length == 0)
+            return (null, TargetLockStatus.NotOnBoard);
+
+        int templateIdx = -1;
+        for (int i = 0; i < _latestSidebarItems.Count; i++)
+            if (_latestSidebarItems[i].Name == targetName) { templateIdx = i; break; }
+        if (templateIdx < 0) return (null, TargetLockStatus.NotOnBoard);
+
+        int? cluster = null;
+        for (int c = 0; c < _latestClusterToTemplate.Length; c++)
+            if (_latestClusterToTemplate[c] == templateIdx) { cluster = c; break; }
+        if (cluster is null) return (null, TargetLockStatus.NotOnBoard);
+
+        if (_latestLabelDiag is { } diag && cluster.Value < diag.ClusterCount
+            && diag.Confidence(cluster.Value) < TargetLockMinConfidence)
+            return (cluster, TargetLockStatus.LowConfidence);
+
+        return (cluster, TargetLockStatus.Locked);
+    }
+
+    /// <summary>Push the Target Hunter lock indicator to the toolbar, de-duped.</summary>
+    private void PushTargetLock(TargetLockStatus status, string? targetName, string? modeText)
+    {
+        if (status == _lastPushedLock && targetName == _lastPushedLockName
+            && modeText == _lastPushedLockMode) return;
+        _lastPushedLock = status;
+        _lastPushedLockName = targetName;
+        _lastPushedLockMode = modeText;
+        Dispatcher.BeginInvoke(() => OnTargetLockChanged?.Invoke(status, targetName, modeText));
     }
 
     public static string MapTemplateToStyle(string templateName)
@@ -1168,6 +1250,15 @@ public partial class OverlayWindow : Window
         (int? best, double? avg) = _historyStore.ScoreAtTurn(style, turn, strategy);
         return new PerStrategyStats(strategy, name, best, avg);
     }
+}
+
+/// <summary>Target Hunter's identification state for the toolbar lock indicator.</summary>
+public enum TargetLockStatus
+{
+    None,          // no target picked (or not Target Hunter) — hide the indicator
+    Locked,        // target confidently identified on the board
+    LowConfidence, // a cluster maps to the target but the labeler match is ambiguous
+    NotOnBoard,    // target name absent from the sidebar, or no cluster maps to it
 }
 
 public sealed record PerStrategyStats(int Strategy, string Name, int? Best, double? Avg);

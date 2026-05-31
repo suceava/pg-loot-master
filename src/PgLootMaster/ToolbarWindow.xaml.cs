@@ -49,6 +49,27 @@ public partial class ToolbarWindow : Window
         };
     }
 
+    /// <summary>Target Hunter lock indicator — whether the chosen target is confidently
+    /// identified on the board. Hidden unless Target Hunter is active with a target.</summary>
+    public void UpdateTargetLock(TargetLockStatus status, string? targetName, string? modeText)
+    {
+        if (status == TargetLockStatus.None || string.IsNullOrEmpty(targetName))
+        {
+            TargetLockText.Visibility = Visibility.Collapsed;
+            return;
+        }
+        string mode = string.IsNullOrEmpty(modeText) ? "" : $"  ·  {modeText}";
+        (string label, Brush brush) = status switch
+        {
+            TargetLockStatus.Locked        => ($"Target: {targetName}  ✓ locked{mode}", AheadBrush),
+            TargetLockStatus.LowConfidence => ($"Target: {targetName}  ⚠ low-confidence", Brushes.Orange),
+            _ /* NotOnBoard */             => ($"Target: {targetName}  — not on board", LabelBrush),
+        };
+        TargetLockText.Text = label;
+        TargetLockText.Foreground = brush;
+        TargetLockText.Visibility = Visibility.Visible;
+    }
+
     private static readonly Brush AheadBrush = new SolidColorBrush(Color.FromRgb(100, 240, 100));
     private static readonly Brush BehindBrush = new SolidColorBrush(Color.FromRgb(255, 100, 100));
     private static readonly Brush LabelBrush = new SolidColorBrush(Color.FromRgb(180, 180, 180));

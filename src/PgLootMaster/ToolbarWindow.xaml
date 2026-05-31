@@ -91,6 +91,12 @@
                                    FontSize="12"
                                    VerticalAlignment="Center" />
                     </StackPanel>
+                    <!-- Target Hunter lock indicator (shown only under Target Hunter) -->
+                    <TextBlock x:Name="TargetLockText"
+                               FontFamily="Consolas"
+                               FontSize="12"
+                               Margin="2,4,0,0"
+                               Visibility="Collapsed" />
                     <!-- Per-strategy comparison rows (visibility toggled per row when data exists) -->
                     <TextBlock x:Name="CompareSafeText"
                                FontFamily="Consolas"

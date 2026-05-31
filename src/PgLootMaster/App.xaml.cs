@@ -19,6 +19,7 @@ public partial class App : Application
         // choices stay in sync with the current sidebar state.
         overlay.OnSidebarItemsChanged = toolbar.RefreshTargetList;
         overlay.OnLiveComparisonChanged = toolbar.UpdateLiveComparison;
+        overlay.OnTargetLockChanged = toolbar.UpdateTargetLock;
 
         // Closing either the toolbar or the overlay shuts the app down.
         toolbar.Closed += (_, _) => Shutdown();
