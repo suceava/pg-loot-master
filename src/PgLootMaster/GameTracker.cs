@@ -1,6 +1,10 @@
 namespace PgLootMaster;
 
-public sealed record GameTurn(int Turn, int Score, double ElapsedSeconds);
+// TurnsLeft is nullable + trailing so historical records (pre-instrumentation) deserialize
+// as null. Mid-game it captures the sidebar's "Turns Left" so a post-hoc analysis can
+// distinguish games that ran out of turns (last TurnsLeft == 0) from games that stalled
+// from no-moves-available (last TurnsLeft > 0).
+public sealed record GameTurn(int Turn, int Score, double ElapsedSeconds, int? TurnsLeft = null);
 
 public sealed class GameRecord
 {
@@ -60,7 +64,7 @@ public sealed class GameTracker
         }
     }
 
-    public void OnFrame(string? gameStyle, int? score, int? turnsMade, int strategy)
+    public void OnFrame(string? gameStyle, int? score, int? turnsMade, int? turnsLeft, int strategy)
     {
         if (string.IsNullOrEmpty(gameStyle)) return;
         if (turnsMade is not int turns) return;
@@ -87,16 +91,19 @@ public sealed class GameTracker
         if (turns > _lastTurnsMade)
         {
             double elapsed = (DateTime.UtcNow - _gameStartUtc).TotalSeconds;
-            _active.Turns.Add(new GameTurn(turns, currentScore, elapsed));
+            _active.Turns.Add(new GameTurn(turns, currentScore, elapsed, turnsLeft));
             _lastTurnsMade = turns;
             changed = true;
         }
-        else if (_active.Turns.Count > 0 && currentScore > _active.Turns[^1].Score)
+        else if (_active.Turns.Count > 0
+                 && (currentScore > _active.Turns[^1].Score
+                     || (turnsLeft is int tl && tl != _active.Turns[^1].TurnsLeft)))
         {
-            // Same turn, score still climbing as the cascade animates. Refresh the latest
-            // turn's score so a panel-lost mid-cascade still captures the full turn total.
+            // Same turn, score still climbing as the cascade animates — or the sidebar's
+            // Turns Left changed (a 4/5-match granted bonus turns). Refresh both on the
+            // latest GameTurn so a panel-lost mid-cascade still captures the full turn total.
             GameTurn last = _active.Turns[^1];
-            _active.Turns[^1] = last with { Score = currentScore };
+            _active.Turns[^1] = last with { Score = currentScore, TurnsLeft = turnsLeft ?? last.TurnsLeft };
             changed = true;
         }
         if (changed) Updated?.Invoke();

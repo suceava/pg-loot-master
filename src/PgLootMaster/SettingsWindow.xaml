@@ -29,9 +29,14 @@
                   FontSize="12"
                   HorizontalAlignment="Left"
                   SelectionChanged="OnStrategyChanged">
-            <ComboBoxItem Content="Safe — favor immediate match, conservative" />
+            <!-- Safe and Speed are retired from selection (the data showed both lose to
+                 Empirical) but kept as collapsed items so the SolverStrategy integer index
+                 stays stable: 0=Safe, 1=Cascade, 2=Speed, 3=TargetHunter, 4=Empirical.
+                 Old saved settings and historical game records keep deserializing cleanly,
+                 and their scoring code stays available if we ever want to re-enable them. -->
+            <ComboBoxItem Content="Safe — favor immediate match, conservative" Visibility="Collapsed" />
             <ComboBoxItem Content="Cascade Hunter — 2-turn lookahead, bet on chain reactions" />
-            <ComboBoxItem Content="Speed — max score per turn, win fast" />
+            <ComboBoxItem Content="Speed — max score per turn, win fast" Visibility="Collapsed" />
             <ComboBoxItem Content="Target Hunter — chase your selected sidebar item (experimental)" />
             <ComboBoxItem Content="Empirical — capture-tier-aware scoring on Cascade Hunter base (experimental)" />
         </ComboBox>

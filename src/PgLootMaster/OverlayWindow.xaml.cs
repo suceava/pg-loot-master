@@ -423,6 +423,7 @@ public partial class OverlayWindow : Window
                 MapTemplateToStyle(loc!.Value.TemplateName),
                 _sidebarReader.Score,
                 _sidebarReader.TurnsMade,
+                _sidebarReader.TurnsLeft,
                 OverlaySettings.Instance.SolverStrategy);
 
             // When the board is obscured (cascade animation OR a Game Over modal),

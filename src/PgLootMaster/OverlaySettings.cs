@@ -64,10 +64,13 @@ public sealed class OverlaySettings : INotifyPropertyChanged
         set => Set(ref _targetItemName, value);
     }
 
-    // Solver strategy preset. 0 = Safe (default), 1 = AggressiveCascade.
-    // Stored as int so OverlaySettings.cs doesn't have to take a dependency on
-    // PgLootMaster.Solver (which would create a layering issue).
-    private int _solverStrategy;
+    // Solver strategy preset. 0=Safe, 1=Cascade Hunter, 2=Speed, 3=Target Hunter, 4=Empirical.
+    // Default is Empirical (4): in the 2026-05 sample it beat every other arm on median,
+    // p10, and p90 for both Loot Master and Deluxe. Safe and Speed are retired from the
+    // picker (hidden ComboBoxItems) but kept as enum values for back-compat with historical
+    // records and any future re-enablement. Stored as int so OverlaySettings doesn't take a
+    // dependency on PgLootMaster.Solver (which would create a layering issue).
+    private int _solverStrategy = 4;
     public int SolverStrategy
     {
         get => _solverStrategy;

@@ -29,7 +29,7 @@ public partial class SettingsWindow : Window
         ShowDebugTextWindowCheckBox.IsChecked = OverlaySettings.Instance.ShowDebugTextWindow;
         ShowSwapHighlightCheckBox.IsChecked = OverlaySettings.Instance.ShowSwapHighlight;
         int idx = OverlaySettings.Instance.SolverStrategy;
-        if (idx < 0 || idx >= StrategyComboBox.Items.Count) idx = 0;
+        if (idx < 0 || idx >= StrategyComboBox.Items.Count) idx = 4;   // Empirical
         StrategyComboBox.SelectedIndex = idx;
         UpdateStrategyDescription();
         RefreshTargetList(sidebarItems ?? System.Array.Empty<SidebarItem>());
