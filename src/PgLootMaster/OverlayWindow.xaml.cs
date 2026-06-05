@@ -89,10 +89,19 @@ public partial class OverlayWindow : Window
     // moment the score last changed. Without this, the displayed delta dropped at the end
     // of every cascade because TurnsMade ticked AFTER the score finished climbing, jumping
     // the baseline up to the next turn's higher reference. Re-anchors only on the next
-    // score change (start of the next cascade), so the delta you saw during the move stays
-    // put until the next move actually starts.
+    // score change (start of the next cascade) — but instead of snapping, the actual
+    // baseline used for lookup eases toward this target over a few frames (see
+    // _liveCompTurnSmoothed) so the delta SLIDES rather than jumps when the baseline shifts.
     private int? _liveCompScore;
-    private int? _liveCompTurn;
+    private int? _liveCompTurn;            // target baseline turn (anchored on score change)
+    private double? _liveCompTurnSmoothed; // tweens toward _liveCompTurn so the baseline shift slides
+    // Target Hunter attempt tracking for the current game. Every distinct target name seen
+    // while in TH mode goes in the set; at finalization each is checked against the final
+    // sidebar's captured items and written as a TargetHunterAttempt on the record. The
+    // StartedUtc field guards against carrying state across games — when the GameTracker
+    // opens a new record we clear and restart.
+    private readonly HashSet<string> _thTargetsAttemptedThisGame = new();
+    private DateTime? _thTrackingGameStartedUtc;
     // Set by the LabelerDebugWindow while it's open so the overlay knows to FORCE
     // LabelClusters to run every frame (normally only Target Hunter runs the labeler).
     // The callback receives the latest diagnostics snapshot or null when labeler didn't run.
@@ -272,6 +281,7 @@ public partial class OverlayWindow : Window
                             int currentStrategy = OverlaySettings.Instance.SolverStrategy;
                             if (currentStrategy == (int)SolverStrategy.TargetHunter
                                 || currentStrategy == (int)SolverStrategy.Empirical
+                                || currentStrategy == (int)SolverStrategy.CascadeAggressive
                                 || labelerDebugOpen)
                             {
                                 // Signature-based labeling: match each cluster's canonical
@@ -336,9 +346,39 @@ public partial class OverlayWindow : Window
                 GameRecord? finished = _gameTracker.FinalizePanelLost();
                 if (finished is not null && finished.Turns.Count > 0)
                 {
-                    _historyStore.Append(finished);
+                    // Build TargetHunterAttempt list from this game's TH targets, using the
+                    // final sidebar Captured flags to decide success.
+                    if (_thTargetsAttemptedThisGame.Count > 0)
+                    {
+                        HashSet<string> capturedNames = _latestSidebarItems
+                            .Where(i => i.Captured && !string.IsNullOrWhiteSpace(i.Name))
+                            .Select(i => i.Name)
+                            .ToHashSet();
+                        foreach (string target in _thTargetsAttemptedThisGame)
+                        {
+                            finished.TargetAttempts.Add(
+                                new TargetHunterAttempt(target, capturedNames.Contains(target)));
+                        }
+                    }
+                    _thTargetsAttemptedThisGame.Clear();
+                    _thTrackingGameStartedUtc = null;
+
+                    // Save rule: discard MixedStrategy games unless they produced TH attempts
+                    // (since the score is invalid but the capture result is the recordable
+                    // signal). Pure TH games save (no score aggregate, but capture data).
+                    bool hasThAttempts = finished.TargetAttempts.Count > 0;
+                    bool validSingleStrategy = !finished.MixedStrategy
+                        && finished.Strategy != (int)SolverStrategy.TargetHunter;
+                    if (hasThAttempts || validSingleStrategy)
+                    {
+                        _historyStore.Append(finished);
+                        OverlayLog.Write($"Game finalized: style={finished.GameStyle} score={finished.FinalScore} turns={finished.FinalTurns} mixed={finished.MixedStrategy} thAttempts={finished.TargetAttempts.Count} duration={GameHistoryStore.DurationMinutes(finished):F1}min");
+                    }
+                    else
+                    {
+                        OverlayLog.Write($"Game DISCARDED (mixed strategy, no TH attempts): style={finished.GameStyle} score={finished.FinalScore} turns={finished.FinalTurns}");
+                    }
                     _historyStore.ClearDraft();
-                    OverlayLog.Write($"Game finalized: style={finished.GameStyle} score={finished.FinalScore} turns={finished.FinalTurns} duration={GameHistoryStore.DurationMinutes(finished):F1}min");
                 }
                 else
                 {
@@ -577,8 +617,23 @@ public partial class OverlayWindow : Window
         SolverStrategy strategy = (SolverStrategy)OverlaySettings.Instance.SolverStrategy;
         string? gameStyle = _gameTracker.Active?.GameStyle;
         string? targetName = OverlaySettings.Instance.TargetItemName;
+        // Track Target Hunter attempts (one entry per distinct target picked while in TH
+        // mode during this game). At finalization we resolve each to "was it captured?" via
+        // the final sidebar Captured flags. The set lives across frames; it resets when the
+        // GameTracker opens a new record (StartedUtc change).
+        if (strategy == SolverStrategy.TargetHunter && !string.IsNullOrWhiteSpace(targetName)
+            && _gameTracker.Active?.StartedUtc is DateTime gameStarted)
+        {
+            if (_thTrackingGameStartedUtc != gameStarted)
+            {
+                _thTargetsAttemptedThisGame.Clear();
+                _thTrackingGameStartedUtc = gameStarted;
+            }
+            _thTargetsAttemptedThisGame.Add(targetName);
+        }
         bool needsCaptureData = strategy == SolverStrategy.TargetHunter
-                              || strategy == SolverStrategy.Empirical;
+                              || strategy == SolverStrategy.Empirical
+                              || strategy == SolverStrategy.CascadeAggressive;
 
         // Resolve the chosen target to a board cluster + a lock-confidence status.
         (int? targetClusterId, TargetLockStatus lockStatus) = ResolveTarget(targetName);
@@ -1243,21 +1298,36 @@ public partial class OverlayWindow : Window
         {
             _liveCompScore = null;
             _liveCompTurn = null;
+            _liveCompTurnSmoothed = null;
             return null;
         }
         if (_sidebarReader.Score is not int score) return null;
         if (_sidebarReader.TurnsMade is not int turn) return null;
 
-        // Re-anchor the comparison baseline only on a score change. Holding it across the
-        // end of a cascade (when TurnsMade ticks but score is stable) prevents the post-
-        // move drop the user could see — the displayed delta sticks at whatever the cascade
-        // ended at until the next move actually scores.
+        // Re-anchor the TARGET baseline turn only on a score change. The smoothed baseline
+        // used for the actual lookup tweens toward this target each frame — so the score
+        // climb during a cascade still shows raw (baseline stable while score moves), but
+        // when the target shifts at the start of the next move, the delta slides over a
+        // handful of frames instead of snapping. Big resets (game restart, OCR returning
+        // after a long gap) snap; in-game shifts ease.
         if (_liveCompScore != score)
         {
             _liveCompScore = score;
             _liveCompTurn = turn;
         }
-        int baselineTurn = _liveCompTurn ?? turn;
+        int targetBaselineTurn = _liveCompTurn ?? turn;
+        const double EaseFactor = 0.25;
+        const int SnapDelta = 5;
+        if (_liveCompTurnSmoothed is null
+            || Math.Abs(targetBaselineTurn - _liveCompTurnSmoothed.Value) > SnapDelta)
+        {
+            _liveCompTurnSmoothed = targetBaselineTurn;
+        }
+        else
+        {
+            _liveCompTurnSmoothed += EaseFactor * (targetBaselineTurn - _liveCompTurnSmoothed.Value);
+        }
+        double baselineTurn = _liveCompTurnSmoothed.Value;
 
         PerStrategyStats[] per = new[]
         {
@@ -1266,14 +1336,37 @@ public partial class OverlayWindow : Window
             PerStrategyFor(active.GameStyle, baselineTurn, 2, "Speed"),
             PerStrategyFor(active.GameStyle, baselineTurn, 3, "Target Hunter"),
             PerStrategyFor(active.GameStyle, baselineTurn, 4, "Empirical"),
+            PerStrategyFor(active.GameStyle, baselineTurn, 5, "Cascade Aggressive"),
         };
         return new LiveComparisonSnapshot(active.GameStyle, turn, score, active.Strategy, per);
     }
 
-    private PerStrategyStats PerStrategyFor(string style, int turn, int strategy, string name)
+    /// <summary>Per-strategy stats at a fractional turn — linearly interpolates between the
+    /// integer turns either side. Lets the baseline lookup track the smoothed (double-valued)
+    /// turn for animation without aliasing to the int floor.</summary>
+    private PerStrategyStats PerStrategyFor(string style, double turn, int strategy, string name)
     {
-        (int? best, double? avg) = _historyStore.ScoreAtTurn(style, turn, strategy);
-        return new PerStrategyStats(strategy, name, best, avg);
+        int lo = (int)Math.Floor(turn);
+        int hi = (int)Math.Ceiling(turn);
+        (int? bestLo, double? avgLo) = _historyStore.ScoreAtTurn(style, lo, strategy);
+        if (lo == hi) return new PerStrategyStats(strategy, name, bestLo, avgLo);
+        (int? bestHi, double? avgHi) = _historyStore.ScoreAtTurn(style, hi, strategy);
+        double frac = turn - lo;
+        int? bestInterp = (bestLo, bestHi) switch
+        {
+            (int bL, int bH) => (int)Math.Round(bL + frac * (bH - bL)),
+            (int bL, null)   => bL,
+            (null, int bH)   => bH,
+            _                => null,
+        };
+        double? avgInterp = (avgLo, avgHi) switch
+        {
+            (double aL, double aH) => aL + frac * (aH - aL),
+            (double aL, null)      => aL,
+            (null, double aH)      => aH,
+            _                      => null,
+        };
+        return new PerStrategyStats(strategy, name, bestInterp, avgInterp);
     }
 }
 

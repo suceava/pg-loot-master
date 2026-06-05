@@ -138,6 +138,11 @@ public sealed class GameHistoryStore
         {
             if (g.GameStyle != style) continue;
             if (strategy.HasValue && g.Strategy != strategy.Value) continue;
+            // Score aggregates ignore games whose score isn't attributable to a single
+            // strategy (MixedStrategy) and Target Hunter games (TH ignores score by design,
+            // so a TH game's FinalScore is incidental and shouldn't pollute averages).
+            if (g.MixedStrategy) continue;
+            if (g.Strategy == 3 /* TargetHunter */) continue;
             if (g.Turns.Count == 0) continue;
             int? scoreAtT = null;
             foreach (GameTurn t in g.Turns)
@@ -149,6 +154,27 @@ public sealed class GameHistoryStore
         }
         if (scores.Count == 0) return (null, null);
         return (scores.Max(), scores.Average());
+    }
+
+    /// <summary>
+    /// Target Hunter capture success rate across games for a given style: how many TH
+    /// targets were attempted vs how many were captured. Counts each TargetHunterAttempt
+    /// entry across all games (a single game may produce multiple if the user switched
+    /// targets). Style="" or null aggregates across all styles.
+    /// </summary>
+    public (int attempts, int captures) TargetHunterStats(string? style = null)
+    {
+        int attempts = 0, captures = 0;
+        foreach (GameRecord g in Games)
+        {
+            if (style is not null && g.GameStyle != style) continue;
+            foreach (TargetHunterAttempt a in g.TargetAttempts)
+            {
+                attempts++;
+                if (a.Captured) captures++;
+            }
+        }
+        return (attempts, captures);
     }
 
     public static double DurationMinutes(GameRecord g)

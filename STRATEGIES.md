@@ -83,8 +83,15 @@ these strategies reason about, see [GAME_RULES.md](GAME_RULES.md).
   getting it to the threshold `N` *first* — the first item to `N` captures and
   **resets every other non-captured item to 0** (GAME_RULES). So chasing a
   hopelessly-behind target just *wastes its board tiles*. Each turn the mode is
-  decided by a feasibility check (time-to-capture = `need / board-tiles`, vs the
-  leader and vs turns left):
+  decided by a feasibility check — an estimated **time-to-capture** compared
+  against the leader and the turns left. Time-to-capture is *not* `need / current
+  tiles`: a match-3 board refills cleared cells from the spawn distribution, so a
+  type's on-board count drifts toward its spawn-share **steady state**
+  (≈ `boardSize / numTypes`) regardless of the current snapshot. `TurnsToCapture`
+  therefore steps turn-by-turn, matching `min(ceiling, tiles · 0.4)` each turn and
+  relaxing `tiles` toward steady — so a transient pile (12 Phoenix now, steady ~7)
+  decays to its sustainable rate instead of masquerading as one, and a starved type
+  (2 tiles now, steady ~7) is allowed to recover. The three modes:
   - **RACE** — target can plausibly reach `N` first and in time: advance it;
     suppress feeding near-`N` competitors; never let one capture (that resets
     the target). When no target match exists, churn **captured items** (they're
@@ -163,3 +170,58 @@ these strategies reason about, see [GAME_RULES.md](GAME_RULES.md).
   Empirical's median/avg `FinalScore` beats Cascade Hunter's, the
   tier-unlock lever is real. If it loses or ties, the formula was right
   about the score surface but tier-unlocks aren't the dominating optimization.
+
+## Cascade Aggressive (experimental)
+
+- **Stated goal:** Top Score — specifically *peak* score, the leaderboard
+  ceiling, not the average. The Deluxe leaderboard's top games sit at
+  ~45 pts/move in 34–50-move games, almost all at Tier 3 (3 captures); the
+  user's Empirical games reach competitive peaks but at ~20 pts/move over
+  77 moves. That gap is the target.
+- **Theory:** Two independent insights, fused.
+  1. **Per-move density is the lever, not game length.** Cascade Hunter's
+     philosophy was already right; the prior data favoring Empirical mixed
+     up *reliability* (variance reduction) with *peak* (what the leaderboard
+     rewards). So push Cascade Hunter's existing levers harder — heavier
+     cascade weighting, bigger bottom-row premium, wider beam — without
+     adding Empirical's tier-unlock term (which biases toward pursuing
+     captures rather than density).
+  2. **Tier Hold (variant-aware).** Per the scoring formulas, capturing one
+     more item past a critical count unlocks **zero** additional per-match
+     bonus but **does** add a new item type to the board, diluting future
+     scoring density forever after. The breakpoints:
+     - **Deluxe** `2·⌈C/2⌉`: C=3 → +4, C=4 → +4 (no change). Hold at C=3.
+     - **Loot Master / Cashfall** `(C≥2 ? 2 : 0)`: C=2 → +2, C=3 → +2 (no
+       change). Hold at C=2.
+
+     Once at hold state, suppress matches that would CAUSE a new capture
+     this turn (massively penalize), and mildly penalize matches that
+     advance any uncaptured item (closer to threshold ⇒ heavier penalty).
+     Captured items are race-neutral (counts frozen) — matching them is
+     the preferred "do no harm" play that keeps the board scoring without
+     walking into the dilution wall.
+- **Implementation:** `Solver.cs` — enum `SolverStrategy.CascadeAggressive = 5`.
+  StrategyParams arm: cascade base **0.95** (up from 0.85), decay **0.95**
+  (up from 0.9), bottom-row **3.0/row** (up from 2.0), beam width **8** (up
+  from default 5); free-turn bonuses retained at 1.25× as in Cascade
+  Hunter; lookahead 0.8 / second-ply 0.5 (2-ply enabled). **No tier-unlock
+  term** — avoids Empirical's capture-pursuit bias. Tier-Hold lives in
+  `ScoreCascade` after the per-match loop: when `CapturedCount >=
+  TierHoldThresholdFor(GameStyle)`, iterate `matchedCellsByType` and
+  subtract `TierHoldCapturePenalty` (500) for any match that would cause a
+  new capture, else `TierHoldAdvancePenalty × matched × (post / threshold)`
+  for advancing an uncaptured item. The labeler runs for this strategy too
+  (needs TypeId → sidebar count mapping for Tier-Hold) — same gate as
+  Empirical / Target Hunter.
+- **Evidence so far:** *No data yet — strategy just landed.*
+- **What the formula implies:** The "no per-match bonus uplift past the hold
+  point" is forced by the formula itself, so the Tier-Hold logic is
+  mathematically supported, not a guess. The open empirical question is
+  whether the aggression tuning OR the Tier Hold OR both account for any
+  observed lift over Cascade Hunter and Empirical. Validation plan: 10+
+  games per variant; compare median, p10, p90, and max against Cascade
+  Hunter and Empirical. If the max climbs significantly (toward the
+  leaderboard ceiling), the joint hypothesis is validated. If only the
+  median moves and max doesn't, the aggression tuning helped but Tier-Hold
+  didn't bite; an attribution split into "Cascade Aggressive (no hold)"
+  and "Tier Hold only" would isolate the cause.

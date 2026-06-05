@@ -45,6 +45,7 @@ public partial class ToolbarWindow : Window
             2 => "SPEED",
             3 => "TARGET HUNTER",
             4 => "EMPIRICAL",
+            5 => "CASCADE AGGR.",
             _ => "?",
         };
     }
@@ -88,6 +89,7 @@ public partial class ToolbarWindow : Window
             CompareSpeedText.Visibility = Visibility.Collapsed;
             CompareTargetHunterText.Visibility = Visibility.Collapsed;
             CompareEmpiricalText.Visibility = Visibility.Collapsed;
+            CompareCascadeAggressiveText.Visibility = Visibility.Collapsed;
             return;
         }
 
@@ -112,11 +114,15 @@ public partial class ToolbarWindow : Window
             RenderStrategyRow(CompareEmpiricalText, snap.PerStrategy[4], snap.Score);
         else
             CompareEmpiricalText.Visibility = Visibility.Collapsed;
+        if (snap.PerStrategy.Length > 5)
+            RenderStrategyRow(CompareCascadeAggressiveText, snap.PerStrategy[5], snap.Score);
+        else
+            CompareCascadeAggressiveText.Visibility = Visibility.Collapsed;
     }
 
-    // Column widths chosen so the longest strategy name ("Cascade Hunter" = 14 chars) and
-    // 4-digit scores both fit. Consolas is monospace so PadLeft/PadRight = visual alignment.
-    private const int LabelColWidth = 18;   // "vs Cascade Hunter:"
+    // Column widths chosen so the longest strategy name ("Cascade Aggressive" = 18 chars)
+    // and 4-digit scores both fit. Consolas is monospace so PadLeft/PadRight = visual alignment.
+    private const int LabelColWidth = 22;   // "vs Cascade Aggressive:"
     private const int ScoreColWidth = 4;    // up to 4-digit scores
     private const int DeltaColWidth = 7;    // "(+1234)" / "(-1234)"
 

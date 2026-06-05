@@ -6,11 +6,18 @@ namespace PgLootMaster;
 // from no-moves-available (last TurnsLeft > 0).
 public sealed record GameTurn(int Turn, int Score, double ElapsedSeconds, int? TurnsLeft = null);
 
+// Per-game Target Hunter attempt: the item the user was chasing, and whether it was
+// captured during the game. One per distinct target picked while in TH mode (a single
+// game can produce multiple entries if the user switched targets).
+public sealed record TargetHunterAttempt(string TargetName, bool Captured);
+
 public sealed class GameRecord
 {
     public string GameStyle { get; set; } = "";
-    // Solver strategy in effect when the game began. Matches OverlaySettings.SolverStrategy:
-    // 0=Safe, 1=AggressiveCascade, 2=Speed. Old records (pre-strategy-field) deserialize as 0.
+    // Solver strategy in effect when the game BEGAN. Matches OverlaySettings.SolverStrategy.
+    // If MixedStrategy is true the score data is invalidated (strategy changed mid-game) and
+    // score aggregates skip the record; for TH-involved games the TargetAttempts list is
+    // still what matters. Old records (pre-strategy-field) deserialize as 0.
     public int Strategy { get; set; }
     public DateTime StartedUtc { get; set; }
     public DateTime? EndedUtc { get; set; }
@@ -18,6 +25,13 @@ public sealed class GameRecord
     public int FinalTurns { get; set; }
     public List<GameTurn> Turns { get; set; } = new();
     public string? Notes { get; set; }
+    // True if the strategy changed during the game — score is no longer attributable to a
+    // single strategy, so per-strategy score aggregates skip these. Defaults to false so old
+    // records (no flag) keep counting as single-strategy.
+    public bool MixedStrategy { get; set; }
+    // TH attempts during this game (one per distinct target picked while in TH mode).
+    // Empty for non-TH games. Old records deserialize as empty (null → new() via default).
+    public List<TargetHunterAttempt> TargetAttempts { get; set; } = new();
 }
 
 /// <summary>
@@ -81,6 +95,15 @@ public sealed class GameTracker
             _gameStartUtc = _active.StartedUtc;
             _lastTurnsMade = -1;
             _lastScore = 0;
+        }
+
+        // Strategy change detection: if the user switched strategy mid-game the score
+        // can no longer be attributed to a single strategy. Mark the record so per-strategy
+        // score aggregates skip it. The strategy field itself stays at whatever the game
+        // started with (for diagnostics); MixedStrategy is the gate.
+        if (strategy != _active.Strategy)
+        {
+            _active.MixedStrategy = true;
         }
 
         int currentScore = score ?? _lastScore;

@@ -37,8 +37,9 @@
             <ComboBoxItem Content="Safe — favor immediate match, conservative" Visibility="Collapsed" />
             <ComboBoxItem Content="Cascade Hunter — 2-turn lookahead, bet on chain reactions" />
             <ComboBoxItem Content="Speed — max score per turn, win fast" Visibility="Collapsed" />
-            <ComboBoxItem Content="Target Hunter — chase your selected sidebar item (experimental)" />
-            <ComboBoxItem Content="Empirical — capture-tier-aware scoring on Cascade Hunter base (experimental)" />
+            <ComboBoxItem Content="Target Hunter — chase your selected sidebar item" />
+            <ComboBoxItem Content="Empirical — capture-tier-aware scoring on Cascade Hunter base" />
+            <ComboBoxItem Content="Cascade Aggressive — Cascade Hunter pushed harder + Tier Hold" />
         </ComboBox>
         <TextBlock x:Name="StrategyDescription"
                    Foreground="#FFAAAAAA"

@@ -11,7 +11,7 @@ public partial class HistoryWindow : Window
 {
     private readonly GameHistoryStore _store;
     // Chart palette per strategy: Safe=blue, Cascade Hunter=orange, Speed=green,
-    // Target Hunter=magenta, Empirical=cyan.
+    // Target Hunter=magenta, Empirical=cyan, Cascade Aggressive=yellow.
     private static readonly OxyColor[] StrategyColors = new[]
     {
         OxyColor.FromRgb(80, 160, 255),    // Safe
@@ -19,6 +19,7 @@ public partial class HistoryWindow : Window
         OxyColor.FromRgb(80, 230, 80),     // Speed
         OxyColor.FromRgb(220, 100, 220),   // Target Hunter
         OxyColor.FromRgb(80, 220, 220),    // Empirical
+        OxyColor.FromRgb(245, 230, 80),    // Cascade Aggressive
     };
     private static readonly OxyColor PlotForeground = OxyColor.FromRgb(220, 220, 220);
     private static readonly OxyColor PlotGridline = OxyColor.FromRgb(60, 60, 60);
@@ -52,10 +53,14 @@ public partial class HistoryWindow : Window
 
     private void Refresh()
     {
-        // Aggregates by (game, strategy).
+        // Aggregates by (game, strategy). Score aggregates skip MixedStrategy (score not
+        // attributable to a single strategy) and Target Hunter (score irrelevant by design —
+        // TH is judged by capture rate, see TargetHunterStats).
         List<AggregateRow> aggRows = new();
         var groups = _store.Games
             .Where(g => g.Turns.Count > 0)
+            .Where(g => !g.MixedStrategy)
+            .Where(g => g.Strategy != 3 /* TargetHunter */)
             .GroupBy(g => (g.GameStyle, g.Strategy))
             .OrderBy(grp => grp.Key.GameStyle)
             .ThenBy(grp => grp.Key.Strategy);
@@ -181,10 +186,14 @@ public partial class HistoryWindow : Window
             LegendTextColor = PlotForeground,
         });
 
-        for (int strategy = 0; strategy <= 4; strategy++)
+        for (int strategy = 0; strategy <= 5; strategy++)
         {
+            // Chart score curves: same filter as aggregates — drop MixedStrategy games and
+            // Target Hunter (TH score irrelevant by design).
             List<GameRecord> games = _store.Games
                 .Where(g => g.Strategy == strategy && g.Turns.Count >= 2 && g.GameStyle == gameFilter)
+                .Where(g => !g.MixedStrategy)
+                .Where(g => g.Strategy != 3 /* TargetHunter */)
                 .ToList();
             if (games.Count == 0) continue;
 
@@ -308,6 +317,7 @@ public partial class HistoryWindow : Window
         2 => "Speed",
         3 => "Target Hunter",
         4 => "Empirical",
+        5 => "Cascade Aggressive",
         _ => "?",
     };
 

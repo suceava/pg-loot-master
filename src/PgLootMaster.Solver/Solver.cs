@@ -49,6 +49,19 @@ public enum SolverStrategy
     /// content is the scoring terms only. See STRATEGIES.md.
     /// </summary>
     Empirical = 4,
+    /// <summary>
+    /// Cascade Aggressive (with Tier Hold): Cascade Hunter's philosophy pushed harder
+    /// (cascade base 0.95, decay 0.95, bottom-row premium 3.0, beam 8) — bet on per-move
+    /// density (top leaderboard players are at ~45 pts/move). Plus a variant-aware
+    /// "Tier Hold": once captures reach the last bonus-tier change (Deluxe: C≥3, Loot
+    /// Master: C≥2), the next capture unlocks no further per-match bonus but DOES dilute
+    /// the board with a new item type, lowering scoring density. So at hold state, matches
+    /// that would cause a new capture are massively penalized and matches that advance any
+    /// uncaptured item are mildly penalized — redirecting play to captured items
+    /// (race-neutral, frozen counts) and low-count items. NO tier-unlock term (avoids
+    /// Empirical's capture-pursuit bias). See STRATEGIES.md.
+    /// </summary>
+    CascadeAggressive = 5,
 }
 
 /// <summary>
@@ -127,9 +140,19 @@ public static class Solver
     private const double TargetRacePush = 100.0;          // FORCE_RESET: per leader tile × closeness
     // Feasibility tuning. The expected target matches/turn scales with how many of the
     // item's tiles are on the board (few tiles ⇒ slow), capped by a per-turn ceiling
-    // (you can't match more than ~this regardless). turns-to-capture = need / rate.
+    // (you can't match more than ~this regardless): rate(x) = min(ceiling, x · TilesToRate).
+    // Crucially the per-turn count is NOT constant: a match-3 board refills cleared cells
+    // from the spawn distribution, so over a multi-turn race every type's on-board count
+    // drifts toward its spawn-share steady state (≈ boardSize / numTypes) regardless of the
+    // current snapshot. TurnsToCapture therefore steps turn-by-turn, relaxing the count
+    // toward steady each turn, instead of dividing need by a frozen snapshot rate. This
+    // stops a transient tile pile (e.g. 12 Phoenix right now, steady ~7) from masquerading
+    // as a sustainable rate, and lets a momentarily-starved type (2 tiles now, steady ~7)
+    // recover as it would in real play.
     private const double TargetRaceRateCeiling = 5.0;  // max tiles of one item matchable per turn
     private const double TargetRaceTilesToRate = 0.4;  // per board-tile contribution to that rate (cap ~12 tiles)
+    private const double TargetRaceReversion = 0.5;    // per-turn fraction the count relaxes toward steady state
+    private const int TargetRaceHorizon = 60;          // cap the turn-stepping loop (safety bound)
     private const double TargetRaceMargin = 1.3;       // ENTER race: target finishes within 1.3× the leader's turns
     private const double TargetRaceStayMargin = 1.5;   // STAY in race until 1.5× — modest hysteresis (absorb noise, drop clear losers)
     private const double TargetRaceResetImminentTurns = 3.0; // only FORCE_RESET if a competitor will capture within ~this many turns
@@ -151,7 +174,8 @@ public static class Solver
                     double lookaheadDiscount,
                     double fourMatchTurnBonus, double fiveMatchTurnBonus,
                     double secondPlyDiscount,
-                    double targetMultiplier)
+                    double targetMultiplier,
+                    int beamWidth)
         StrategyParams(SolverStrategy s) => s switch
         {
             // Cascade Hunter: 2-turn lookahead via beam search. Heavy cascade weighting
@@ -168,7 +192,8 @@ public static class Solver
                 fourMatchTurnBonus: FourMatchTurnBonus * 1.25,
                 fiveMatchTurnBonus: FiveMatchTurnBonus * 1.25,
                 secondPlyDiscount: 0.5,
-                targetMultiplier: TargetMultiplier),
+                targetMultiplier: TargetMultiplier,
+                beamWidth: DefaultBeamWidth),
             SolverStrategy.Speed => (
                 cascadeStepBase: 0.7,
                 cascadeStepDecay: 0.85,
@@ -178,7 +203,8 @@ public static class Solver
                 fourMatchTurnBonus: FourMatchTurnBonus * 0.25,
                 fiveMatchTurnBonus: FiveMatchTurnBonus * 0.25,
                 secondPlyDiscount: 0.0,
-                targetMultiplier: TargetMultiplier),
+                targetMultiplier: TargetMultiplier,
+                beamWidth: DefaultBeamWidth),
             // Target Hunter: scores via the pure-race ScoreTargetRace, so the cascade /
             // turn-bonus / target-multiplier params here are unused. Only lookaheadDiscount
             // is read (in FindBestSwap) — 0 disables lookahead, which the immediate
@@ -192,7 +218,8 @@ public static class Solver
                 fourMatchTurnBonus: FourMatchTurnBonus,
                 fiveMatchTurnBonus: FiveMatchTurnBonus,
                 secondPlyDiscount: 0.0,
-                targetMultiplier: TargetMultiplier * 4.0),
+                targetMultiplier: TargetMultiplier * 4.0,
+                beamWidth: DefaultBeamWidth),
             // Empirical: inherits Cascade Hunter's strategic parameters verbatim — the
             // experimental content is the variant-aware per-match formula in
             // ScoreSingleMatch and the tier-unlock term in ScoreCascade, not the
@@ -206,7 +233,22 @@ public static class Solver
                 fourMatchTurnBonus: FourMatchTurnBonus * 1.25,
                 fiveMatchTurnBonus: FiveMatchTurnBonus * 1.25,
                 secondPlyDiscount: 0.5,
-                targetMultiplier: TargetMultiplier),
+                targetMultiplier: TargetMultiplier,
+                beamWidth: DefaultBeamWidth),
+            // Cascade Aggressive: Cascade Hunter's levers pushed harder + a per-variant
+            // Tier Hold (applied in ScoreCascade, not here). Beam widened so the 2-ply
+            // tree explores more of the high-density candidates.
+            SolverStrategy.CascadeAggressive => (
+                cascadeStepBase: 0.95,
+                cascadeStepDecay: 0.95,
+                turnBonusAllSteps: true,
+                bottomBonusPerRow: 3.0,
+                lookaheadDiscount: 0.8,
+                fourMatchTurnBonus: FourMatchTurnBonus * 1.25,
+                fiveMatchTurnBonus: FiveMatchTurnBonus * 1.25,
+                secondPlyDiscount: 0.5,
+                targetMultiplier: TargetMultiplier,
+                beamWidth: 8),
             _ /* Safe */ => (
                 cascadeStepBase: 0.3,
                 cascadeStepDecay: 0.7,
@@ -216,13 +258,25 @@ public static class Solver
                 fourMatchTurnBonus: FourMatchTurnBonus,
                 fiveMatchTurnBonus: FiveMatchTurnBonus,
                 secondPlyDiscount: 0.0,
-                targetMultiplier: TargetMultiplier),
+                targetMultiplier: TargetMultiplier,
+                beamWidth: DefaultBeamWidth),
         };
 
     // Beam width for the 2-ply lookahead. Tuned to keep worst-case FindBestSwap under the
-    // 150 ms per-frame budget. ~84 swaps × beam × 84 swaps × cascade cost. Start small,
-    // lift if profiling shows headroom.
-    private const int TwoPlyBeam = 5;
+    // 150 ms per-frame budget. ~84 swaps × beam × 84 swaps × cascade cost. Per-strategy
+    // (see beamWidth in StrategyParams) so Cascade Aggressive can search wider.
+    private const int DefaultBeamWidth = 5;
+    // Tier Hold thresholds: capturedCount at which "next capture unlocks no further per-
+    // match bonus." Deluxe: bonus = 2·⌈C/2⌉, so C=3 → +4, C=4 → +4 (no change). Loot
+    // Master / Cashfall: bonus = (C≥2 ? 2 : 0), so C=2 → +2, C=3 → +2 (no change).
+    private const int TierHoldThresholdLootMaster = 2;
+    private const int TierHoldThresholdDeluxe = 3;
+    // Tier-Hold penalties applied in CascadeAggressive once held. Capture penalty must
+    // exceed any plausible positive score from a cascade so the solver effectively never
+    // chooses a capture-triggering move. Advance penalty scales with how close the item
+    // is to threshold and how many of its tiles the move matches.
+    private const double TierHoldCapturePenalty = 500.0;
+    private const double TierHoldAdvancePenalty = 5.0;
 
     public static SwapRecommendation? FindBestSwap(Board board, out List<SwapRecommendation> topCandidates, SolverContext? context = null)
     {
@@ -243,7 +297,7 @@ public static class Solver
             {
                 if (useTwoPly)
                 {
-                    lookaheadScore = ComputeTwoPlyLookahead(result.FinalBoard, context, sp.secondPlyDiscount);
+                    lookaheadScore = ComputeTwoPlyLookahead(result.FinalBoard, context, sp.secondPlyDiscount, sp.beamWidth);
                 }
                 else
                 {
@@ -272,7 +326,7 @@ public static class Solver
     /// Returns max over beam members of (level1 score + secondPlyDiscount × best level2 score).
     /// </summary>
     private static double ComputeTwoPlyLookahead(Board level1Board, SolverContext? context,
-        double secondPlyDiscount)
+        double secondPlyDiscount, int beamWidth)
     {
         // Collect (score, post-cascade board) for every legal swap on level1Board.
         List<(double s1, Board fb1)> level1 = new();
@@ -286,7 +340,7 @@ public static class Solver
         level1.Sort((a, b) => b.s1.CompareTo(a.s1));
 
         double bestCombined = 0;
-        int beam = Math.Min(TwoPlyBeam, level1.Count);
+        int beam = Math.Min(beamWidth, level1.Count);
         for (int i = 0; i < beam; i++)
         {
             (double s1, Board fb1) = level1[i];
@@ -319,13 +373,16 @@ public static class Solver
          double bottomBonusPerRow, _,
          double fourMatchBonus, double fiveMatchBonus,
          _,
-         double targetMult) =
+         double targetMult,
+         _) =
             StrategyParams(context?.Strategy ?? SolverStrategy.Safe);
 
-        // Per-typeId matched-cell counts across the cascade — only Empirical needs them
-        // (its tier-unlock term). Target Hunter does its own tally in ScoreTargetRace.
+        // Per-typeId matched-cell counts across the cascade — needed by Empirical's
+        // tier-unlock term and Cascade Aggressive's Tier Hold suppression. Target Hunter
+        // does its own tally in ScoreTargetRace.
         Dictionary<int, int>? matchedCellsByType = null;
-        if (context?.Strategy == SolverStrategy.Empirical
+        if ((context?.Strategy == SolverStrategy.Empirical
+             || context?.Strategy == SolverStrategy.CascadeAggressive)
             && context.CaptureThreshold is not null
             && context.CurrentCounts is not null)
         {
@@ -413,8 +470,44 @@ public static class Solver
             }
         }
 
+        // Cascade Aggressive — Tier Hold suppression. Once captures reach the variant's
+        // last bonus-tier change, the next capture unlocks no further per-match bonus but
+        // adds a new item type to the board → dilution → lower scoring density forever
+        // after. So heavily penalize moves that WOULD cause a new capture this turn, and
+        // mildly penalize moves that advance any uncaptured item (closer to threshold ⇒
+        // larger penalty). Captured items (race-neutral, frozen counts) are unaffected;
+        // matching them is the preferred "do no harm" play in hold state.
+        if (context?.Strategy == SolverStrategy.CascadeAggressive
+            && matchedCellsByType is not null
+            && context.CapturedCount is int heldCaptured
+            && context.CaptureThreshold is int holdThresh
+            && context.CurrentCounts is not null
+            && heldCaptured >= TierHoldThresholdFor(context.GameStyle))
+        {
+            foreach (KeyValuePair<int, int> kv in matchedCellsByType)
+            {
+                context.CurrentCounts.TryGetValue(kv.Key, out int curCount);
+                if (curCount >= holdThresh) continue;                        // captured, race-neutral
+                int post = curCount + kv.Value;
+                if (post >= holdThresh)
+                {
+                    score -= TierHoldCapturePenalty;                         // do not walk into the next capture
+                }
+                else
+                {
+                    score -= TierHoldAdvancePenalty * kv.Value * (post / (double)holdThresh);
+                }
+            }
+        }
+
         return score;
     }
+
+    /// <summary>Capture count at/above which Tier Hold engages for the given variant —
+    /// the last value where the per-match bonus changes. Beyond it, further captures
+    /// only dilute the board. Unknown variants fall back to Loot Master's threshold.</summary>
+    private static int TierHoldThresholdFor(string? gameStyle) =>
+        gameStyle == "Deluxe" ? TierHoldThresholdDeluxe : TierHoldThresholdLootMaster;
 
     /// <summary>Target Hunter feasibility readout: the decided mode plus the estimated
     /// turns-to-capture for the target and the fastest competitor (for the lock line).</summary>
@@ -448,16 +541,23 @@ public static class Solver
         IReadOnlyDictionary<int, int>? tiles = context.TilesByType;
         if (tiles is null) return new(TargetMode.Race, 0, double.PositiveInfinity);  // no board-shape data
 
+        // Steady state: the count any type relaxes toward as the board refills from the
+        // spawn distribution. Uniform spawn over the types present ⇒ boardSize / numTypes,
+        // the same target count for every type (the snapshot is just a noisy sample of it).
+        int boardSize = 0;
+        foreach (int v in tiles.Values) boardSize += v;
+        double steady = tiles.Count > 0 ? (double)boardSize / tiles.Count : 0;
+
         counts.TryGetValue(target, out int tc);
         if (tc >= n) return new(TargetMode.Idle, 0, double.PositiveInfinity);        // already captured
-        double targetTurns = TurnsToCapture(n - tc, TilesOf(tiles, target));
+        double targetTurns = TurnsToCapture(n - tc, TilesOf(tiles, target), steady);
 
         // Fastest live competitor.
         double leaderTurns = double.PositiveInfinity;
         foreach (KeyValuePair<int, int> kv in counts)
         {
             if (kv.Key == target || kv.Value >= n) continue;
-            double t = TurnsToCapture(n - kv.Value, TilesOf(tiles, kv.Key));
+            double t = TurnsToCapture(n - kv.Value, TilesOf(tiles, kv.Key), steady);
             if (t < leaderTurns) leaderTurns = t;
         }
 
@@ -472,17 +572,39 @@ public static class Solver
         TargetMode mode;
         if (turnsOk && aheadOfField) mode = TargetMode.Race;
         else if (leaderTurns <= TargetRaceResetImminentTurns
-                 && TurnsToCapture(n, TilesOf(tiles, target)) <= turnsLeft)
+                 && TurnsToCapture(n, TilesOf(tiles, target), steady) <= turnsLeft)
             mode = TargetMode.ForceReset;   // a reset is coming regardless — take it, then re-race
         else mode = TargetMode.Idle;        // unreachable / no imminent reset — preserve tiles, wait
 
         return new(mode, targetTurns, leaderTurns);
     }
 
-    private static double TurnsToCapture(int need, int boardTiles)
+    /// <summary>
+    /// Expected turns to accumulate <paramref name="need"/> matches of a type that currently
+    /// has <paramref name="boardTiles"/> tiles on the board and a spawn-share steady state of
+    /// <paramref name="steady"/> tiles. The rate is NOT constant: each turn we match
+    /// <c>min(ceiling, tiles · TilesToRate)</c>, then the count relaxes toward <paramref name="steady"/>
+    /// (the board refilling from the spawn distribution). So a transient pile decays toward its
+    /// sustainable rate and a starved type recovers — both over the first few turns. Returns a
+    /// fractional turn count (interpolated within the crossing turn), or +∞ if the type can never
+    /// reach <paramref name="need"/> within the horizon (e.g. zero tiles and zero steady).
+    /// </summary>
+    private static double TurnsToCapture(int need, int boardTiles, double steady)
     {
-        double rate = Math.Min(TargetRaceRateCeiling, boardTiles * TargetRaceTilesToRate);
-        return rate > 0 ? need / rate : double.PositiveInfinity;
+        if (need <= 0) return 0;
+        // Truly dead only if it has no tiles now AND none will ever spawn (steady ~0).
+        if (boardTiles <= 0 && steady <= 0) return double.PositiveInfinity;
+        double tiles = boardTiles;
+        double captured = 0;
+        for (int turn = 1; turn <= TargetRaceHorizon; turn++)
+        {
+            double rate = Math.Min(TargetRaceRateCeiling, tiles * TargetRaceTilesToRate);
+            if (rate > 0 && captured + rate >= need)
+                return (turn - 1) + (need - captured) / rate;       // interpolate within the crossing turn
+            captured += rate;
+            tiles += (steady - tiles) * TargetRaceReversion;        // relax toward spawn-share steady state (0-tile types recover)
+        }
+        return double.PositiveInfinity;
     }
 
     private static int TilesOf(IReadOnlyDictionary<int, int> tiles, int type) =>
