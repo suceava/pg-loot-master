@@ -295,6 +295,12 @@ public partial class HistoryWindow : Window
         public int Turns { get; }
         public string ScorePerMin { get; }
         public string Duration { get; }
+        // Status note for the per-game list: surfaces "mixed" when the strategy changed
+        // mid-game (and the score therefore isn't counted in aggregates) and the per-target
+        // capture results for any Target Hunter attempts. Blank for clean single-strategy
+        // non-TH games. The Source record is the authoritative truth — this is just a
+        // user-readable summary for the grid.
+        public string Notes { get; }
 
         public GameRow(GameRecord g)
         {
@@ -307,6 +313,11 @@ public partial class HistoryWindow : Window
             double minutes = GameHistoryStore.DurationMinutes(g);
             ScorePerMin = minutes > 0.01 ? (g.FinalScore / minutes).ToString("F0", CultureInfo.InvariantCulture) : "—";
             Duration = minutes > 0 ? $"{(int)minutes}m {(int)((minutes - (int)minutes) * 60)}s" : "—";
+            List<string> parts = new();
+            if (g.MixedStrategy) parts.Add("mixed strategy");
+            foreach (TargetHunterAttempt a in g.TargetAttempts)
+                parts.Add(a.Captured ? $"✓ {a.TargetName}" : $"✗ {a.TargetName}");
+            Notes = string.Join("; ", parts);
         }
     }
 

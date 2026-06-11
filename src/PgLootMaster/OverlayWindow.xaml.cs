@@ -363,22 +363,15 @@ public partial class OverlayWindow : Window
                     _thTargetsAttemptedThisGame.Clear();
                     _thTrackingGameStartedUtc = null;
 
-                    // Save rule: discard MixedStrategy games unless they produced TH attempts
-                    // (since the score is invalid but the capture result is the recordable
-                    // signal). Pure TH games save (no score aggregate, but capture data).
-                    bool hasThAttempts = finished.TargetAttempts.Count > 0;
-                    bool validSingleStrategy = !finished.MixedStrategy
-                        && finished.Strategy != (int)SolverStrategy.TargetHunter;
-                    if (hasThAttempts || validSingleStrategy)
-                    {
-                        _historyStore.Append(finished);
-                        OverlayLog.Write($"Game finalized: style={finished.GameStyle} score={finished.FinalScore} turns={finished.FinalTurns} mixed={finished.MixedStrategy} thAttempts={finished.TargetAttempts.Count} duration={GameHistoryStore.DurationMinutes(finished):F1}min");
-                    }
-                    else
-                    {
-                        OverlayLog.Write($"Game DISCARDED (mixed strategy, no TH attempts): style={finished.GameStyle} score={finished.FinalScore} turns={finished.FinalTurns}");
-                    }
+                    // Save every finalized game so it stays visible in the History list —
+                    // the MixedStrategy / Strategy=TH flags drive whether it counts toward
+                    // per-strategy score aggregates (filtered at read time in
+                    // GameHistoryStore.ScoreAtTurn and the chart / aggregate-table queries
+                    // in HistoryWindow), but the record itself is still there for the user
+                    // to see what they played.
+                    _historyStore.Append(finished);
                     _historyStore.ClearDraft();
+                    OverlayLog.Write($"Game finalized: style={finished.GameStyle} score={finished.FinalScore} turns={finished.FinalTurns} mixed={finished.MixedStrategy} thAttempts={finished.TargetAttempts.Count} duration={GameHistoryStore.DurationMinutes(finished):F1}min");
                 }
                 else
                 {

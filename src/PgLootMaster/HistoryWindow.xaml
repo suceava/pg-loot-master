@@ -200,6 +200,7 @@
                             <DataGridTextColumn Header="Turns"     Binding="{Binding Turns}"        Width="70"  ElementStyle="{StaticResource RightCell}" />
                             <DataGridTextColumn Header="Score/min" Binding="{Binding ScorePerMin}"  Width="90"  ElementStyle="{StaticResource RightCell}" />
                             <DataGridTextColumn Header="Duration"  Binding="{Binding Duration}"     Width="100" ElementStyle="{StaticResource RightCell}" />
+                            <DataGridTextColumn Header="Notes"     Binding="{Binding Notes}"        Width="*"   ElementStyle="{StaticResource LeftCell}" />
                         </DataGrid.Columns>
                     </DataGrid>
                 </DockPanel>
