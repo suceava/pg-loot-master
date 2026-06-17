@@ -2,6 +2,8 @@
 
 A Windows overlay that watches Project: Gorgon's **match-3 minigames** and tells you which tiles to swap. Picks moves with a cascade-aware solver, tracks your scores per strategy, and shows how each game stacks up against your historical best.
 
+![Swap recommendation overlay](docs/screenshots/hero.png)
+
 Works with all three match-3 vendors:
 - **Loot Master**
 - **Cashfall**
