@@ -11,7 +11,10 @@ public partial class ToolbarWindow : Window
 {
     private SettingsWindow? _settingsWindow;
     private HistoryWindow? _historyWindow;
-    private LabelerDebugWindow? _labelerDebugWindow;
+    // LabelerDebugWindow is no longer surfaced on the toolbar — its diagnostics are only
+    // useful when investigating item-recognition failures, which the user shouldn't have to
+    // deal with. The window class stays in the repo for dev work; instantiate it directly
+    // from code if you need it.
     private readonly GameHistoryStore _historyStore;
     // Set by App.OnStartup so the toolbar can wire the LabelerDebug window's lifecycle
     // (open / close → toggling the overlay's OnLabelerDiagnosticsChanged callback).
@@ -224,38 +227,6 @@ public partial class ToolbarWindow : Window
         else
         {
             _historyWindow.Activate();
-        }
-    }
-
-    private void OnLabelerDebugClick(object sender, RoutedEventArgs e)
-    {
-        if (_labelerDebugWindow is null || !_labelerDebugWindow.IsLoaded)
-        {
-            _labelerDebugWindow = new LabelerDebugWindow { Owner = this };
-            // Hook the overlay's labeler-diagnostics push → debug window. Setting the
-            // callback ALSO triggers the overlay to force LabelClusters to run every
-            // frame (the overlay reads "callback non-null" as "debug is open").
-            if (Overlay is not null)
-            {
-                Overlay.OnLabelerDiagnosticsChanged = diag =>
-                {
-                    if (_labelerDebugWindow is not null && _labelerDebugWindow.IsLoaded)
-                    {
-                        _labelerDebugWindow.Update(diag);
-                    }
-                };
-            }
-            _labelerDebugWindow.Closed += (_, _) =>
-            {
-                _labelerDebugWindow = null;
-                // Drop the callback → overlay stops forcing LabelClusters.
-                if (Overlay is not null) Overlay.OnLabelerDiagnosticsChanged = null;
-            };
-            _labelerDebugWindow.Show();
-        }
-        else
-        {
-            _labelerDebugWindow.Activate();
         }
     }
 

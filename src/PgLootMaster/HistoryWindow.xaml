@@ -3,6 +3,7 @@
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:oxy="http://oxyplot.org/wpf"
         Title="PG Loot Master — History"
+        Icon="/app.ico"
         WindowStyle="ToolWindow"
         Topmost="True"
         ShowInTaskbar="False"

@@ -39,12 +39,6 @@
                         FontSize="11"
                         Margin="0,0,4,0"
                         Click="OnHistoryClick" />
-                <Button x:Name="LabelerDebugButton"
-                        Content="Labeler"
-                        Width="64" Height="24"
-                        FontSize="11"
-                        Margin="0,0,4,0"
-                        Click="OnLabelerDebugClick" />
                 <Button x:Name="CloseButton"
                         Content="Close"
                         Width="56" Height="24"

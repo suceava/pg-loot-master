@@ -64,13 +64,16 @@ public sealed class OverlaySettings : INotifyPropertyChanged
         set => Set(ref _targetItemName, value);
     }
 
-    // Solver strategy preset. 0=Safe, 1=Cascade Hunter, 2=Speed, 3=Target Hunter, 4=Empirical.
-    // Default is Empirical (4): in the 2026-05 sample it beat every other arm on median,
-    // p10, and p90 for both Loot Master and Deluxe. Safe and Speed are retired from the
-    // picker (hidden ComboBoxItems) but kept as enum values for back-compat with historical
-    // records and any future re-enablement. Stored as int so OverlaySettings doesn't take a
-    // dependency on PgLootMaster.Solver (which would create a layering issue).
-    private int _solverStrategy = 4;
+    // Solver strategy preset. 0=Safe, 1=Cascade Hunter, 2=Speed, 3=Target Hunter,
+    // 4=Empirical, 5=Cascade Aggressive. Default is Cascade Aggressive (5): in the 2026-06
+    // sample it took the top Deluxe score (1753) and beat Empirical on average (1201 vs
+    // 1168), avg/min, and top/min with n=34. LM data still pending — we're betting the LM
+    // Tier Hold (C≥2, same logic as Deluxe at C≥3) generalises and the aggression tuning
+    // is just amplified Cascade Hunter, which historically held the LM peak. Safe and
+    // Speed are retired from the picker (hidden ComboBoxItems) but kept as enum values for
+    // back-compat with historical records and any future re-enablement. Stored as int so
+    // OverlaySettings doesn't take a dependency on PgLootMaster.Solver (layering).
+    private int _solverStrategy = 5;
     public int SolverStrategy
     {
         get => _solverStrategy;
