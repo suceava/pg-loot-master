@@ -23,9 +23,52 @@ public sealed class PanelLocator : IDisposable
     private const int LocalSearchPadding = 80;
 
     /// <summary>
-    /// Construct with a directory path or a single file path. If a directory, loads every
-    /// "panel-title*.png" template found inside. If a file, loads just that one. Each frame
-    /// is matched against every template; the highest-confidence match above threshold wins.
+    /// Construct from panel-title templates embedded in this assembly as manifest resources
+    /// (the samples/templates/panel-title*.png files are compiled in via EmbeddedResource in
+    /// the .csproj). Lets the app ship as a single self-contained .exe — no external
+    /// Templates\ folder next to the exe. Each frame is matched against every template; the
+    /// highest-confidence match above threshold wins.
+    /// </summary>
+    public PanelLocator(double matchThreshold = 0.7)
+    {
+        List<OpenCvMat> templates = new();
+        List<string> names = new();
+
+        System.Reflection.Assembly asm = typeof(PanelLocator).Assembly;
+        // The LogicalName in the .csproj is "PgLootMaster.Vision.Templates.<filename>.png".
+        const string ResourcePrefix = "PgLootMaster.Vision.Templates.";
+        foreach (string resName in asm.GetManifestResourceNames())
+        {
+            if (!resName.StartsWith(ResourcePrefix, StringComparison.Ordinal)) continue;
+            if (!resName.EndsWith(".png", StringComparison.OrdinalIgnoreCase)) continue;
+
+            using Stream? s = asm.GetManifestResourceStream(resName);
+            if (s is null) continue;
+            using MemoryStream ms = new();
+            s.CopyTo(ms);
+            OpenCvMat t = Cv2.ImDecode(ms.ToArray(), ImreadModes.Color);
+            if (t.Empty()) continue;
+
+            templates.Add(t);
+            // Recover the file name minus extension: "panel-title-deluxe".
+            string fileName = resName.Substring(ResourcePrefix.Length);
+            int dot = fileName.LastIndexOf('.');
+            names.Add(dot > 0 ? fileName.Substring(0, dot) : fileName);
+        }
+
+        if (templates.Count == 0)
+            throw new InvalidOperationException(
+                "No panel-title templates found in the assembly's embedded resources.");
+
+        _templates = templates.ToArray();
+        _templateNames = names.ToArray();
+        _matchThreshold = matchThreshold;
+    }
+
+    /// <summary>
+    /// Construct with a directory path or a single file path. Kept for the Vision tests,
+    /// which point at samples/templates/ on disk. If a directory, loads every
+    /// "panel-title*.png" template found inside. If a file, loads just that one.
     /// </summary>
     public PanelLocator(string templatePathOrDir, double matchThreshold = 0.7)
     {

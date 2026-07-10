@@ -147,10 +147,11 @@ public partial class OverlayWindow : Window
             TimeSpan.FromSeconds(1));
         _captureCoordinator.FrameArrived += _debugFrameSink.Accept;
 
-        string templateDir = System.IO.Path.Combine(AppContext.BaseDirectory, "Templates");
-        _panelLocator = new PanelLocator(templateDir);
+        // Templates are baked into the Vision assembly as manifest resources so we ship as
+        // a single self-contained .exe with no Templates\ folder next to it.
+        _panelLocator = new PanelLocator();
         _captureCoordinator.FrameArrived += OnFrameForPanelDetection;
-        OverlayLog.Write($"PanelLocator loaded templates: {string.Join(", ", _panelLocator.TemplateNames)} from {templateDir}");
+        OverlayLog.Write($"PanelLocator loaded templates (embedded): {string.Join(", ", _panelLocator.TemplateNames)}");
 
         // Restore any in-progress game from the previous session. Tracker picks up where it
         // left off; next OnFrame just continues appending turns from the last known one.

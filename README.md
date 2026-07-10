@@ -13,8 +13,8 @@ Works with all three match-3 vendors:
 
 ## Install
 
-1. Grab the latest **`PgLootMaster-windows.zip`** from [Releases](https://github.com/suceava/pg-loot-master/releases).
-2. Unzip anywhere. You'll get `PgLootMaster.exe` and a `Templates\` folder next to it — **keep them together**.
+1. Download the latest **`PgLootMaster.exe`** from [Releases](https://github.com/suceava/pg-loot-master/releases). One file, ~270 MB (bundled Windows runtime + everything it needs).
+2. Save it anywhere on disk. No installer, no zip — that one file is the whole app.
 3. Run Project: Gorgon in **borderless windowed** mode. Exclusive fullscreen blocks the tool from seeing the screen.
 4. Double-click `PgLootMaster.exe`.
    - First launch shows a SmartScreen warning ("Windows protected your PC") because the exe isn't code-signed. Click **More info** → **Run anyway**. One-time.

@@ -12,11 +12,13 @@
   </ItemGroup>
 
   <ItemGroup>
-    <!-- Copy every panel-title*.png template so PanelLocator picks them up. Drop a new
-         file (e.g. panel-title-cashfall.png) into samples/templates/ to add a variant. -->
-    <Content Include="..\..\samples\templates\panel-title*.png" Link="Templates\%(Filename)%(Extension)">
-      <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
-    </Content>
+    <!-- Embed every panel-title*.png template into the assembly so PanelLocator can load
+         them from manifest resources at runtime — no on-disk Templates\ folder required.
+         Lets the app ship as a single self-contained .exe. Drop a new file (e.g.
+         panel-title-cashfall.png) into samples/templates/ to add a variant.
+         LogicalName picks the resource id PanelLocator looks up. -->
+    <EmbeddedResource Include="..\..\samples\templates\panel-title*.png"
+                      LogicalName="PgLootMaster.Vision.Templates.%(Filename)%(Extension)" />
   </ItemGroup>
 
 </Project>

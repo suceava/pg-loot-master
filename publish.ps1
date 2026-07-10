@@ -5,10 +5,9 @@
 #   .\publish.ps1 -Release v1.0.0 — build, then create a GitHub release with the exe attached
 #
 # Output:
-#   .\dist\PgLootMaster.exe
-#   .\dist\Templates\*.png
+#   .\dist\PgLootMaster.exe   (single file — panel templates are baked into the assembly)
 #
-# Distributable: zip the entire dist\ folder, or use -Release to upload via gh CLI.
+# Distributable: ship the .exe directly, or use -Release to upload via gh CLI.
 
 param(
     [string]$Release,
@@ -41,16 +40,15 @@ dotnet publish (Join-Path $root 'src\PgLootMaster\PgLootMaster.csproj') `
 
 if ($LASTEXITCODE -ne 0) { throw "Publish failed" }
 
-# Stage into dist/ (no pdbs).
+# Stage the single exe into dist/. Panel templates are baked into the Vision assembly, so
+# there's no Templates\ folder to ship separately.
 New-Item -ItemType Directory -Path $distDir | Out-Null
 Copy-Item (Join-Path $publishDir 'PgLootMaster.exe') $distDir
-Copy-Item (Join-Path $publishDir 'Templates') $distDir -Recurse
 
 $exe = Join-Path $distDir 'PgLootMaster.exe'
 $size = (Get-Item $exe).Length / 1MB
 Write-Output ""
 Write-Output ("Built: {0} ({1:N0} MB)" -f $exe, $size)
-Write-Output ("Templates: {0}" -f (Join-Path $distDir 'Templates'))
 
 if ($Release) {
     Write-Output ""
@@ -60,20 +58,9 @@ if ($Release) {
     $ghVersion = & gh --version 2>$null
     if ($LASTEXITCODE -ne 0) { throw "gh CLI not found; install from https://cli.github.com" }
 
-    # Also zip the Templates folder alongside, since the user needs both. Two assets:
-    #   PgLootMaster.exe (271 MB) + Templates/ files
-    # Easier: zip dist\ as a single asset.
-    $zipPath = Join-Path $distDir 'PgLootMaster-windows.zip'
-    if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
-    Compress-Archive -Path (Join-Path $distDir 'PgLootMaster.exe'), (Join-Path $distDir 'Templates') `
-        -DestinationPath $zipPath -CompressionLevel Optimal
-
-    $zipSize = (Get-Item $zipPath).Length / 1MB
-    Write-Output ("Zipped: {0} ({1:N0} MB)" -f $zipPath, $zipSize)
-
     $releaseArgs = @(
         'release', 'create', $Release,
-        $zipPath,
+        $exe,
         '--title', $Release,
         '--latest'
     )

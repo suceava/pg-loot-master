@@ -80,7 +80,7 @@ The vision fixtures are real PG frames under `samples/screenshots/`. Add a fixtu
 powershell -ExecutionPolicy Bypass -File .\publish.ps1
 ```
 
-Produces `dist\PgLootMaster.exe` (~270 MB — bundled .NET runtime + OpenCV natives) plus `dist\Templates\` holding the panel-title images. Copy the whole `dist\` folder to use the tool on another Windows machine; no .NET install required there.
+Produces a single `dist\PgLootMaster.exe` (~270 MB — the .NET runtime, OpenCV natives, and panel-title templates are all bundled). Copy the exe to any Windows machine and run; no .NET install and no external `Templates\` folder needed. Templates are embedded in the Vision assembly as manifest resources (see `PgLootMaster.Vision.csproj` `<EmbeddedResource>` and `PanelLocator`'s parameterless constructor).
 
 ## Publishing a GitHub release
 
@@ -88,7 +88,7 @@ Produces `dist\PgLootMaster.exe` (~270 MB — bundled .NET runtime + OpenCV nati
 powershell -ExecutionPolicy Bypass -File .\publish.ps1 -Release v1.2.0
 ```
 
-Builds, zips `PgLootMaster.exe` + `Templates\` into `dist\PgLootMaster-windows.zip`, and creates a GitHub release at the given tag with that zip as the asset. Requires the `gh` CLI to be installed and authenticated. Release notes auto-generate from commits since the previous tag — override with `-Notes "..."`.
+Builds `dist\PgLootMaster.exe` and creates a GitHub release at the given tag with the exe attached directly as the asset (no zip — users just download and double-click). Requires the `gh` CLI installed and authenticated. Release notes auto-generate from commits since the previous tag — override with `-Notes "..."`.
 
 Version numbers follow semver-ish: bump minor for a user-visible feature release (new strategy, new game variant), patch for bug fixes, major for a breaking format change to the saved history file.
 
