@@ -4,6 +4,8 @@ A Windows overlay that watches Project: Gorgon's **match-3 minigames** and tells
 
 ![Swap recommendation overlay](docs/screenshots/hero.png)
 
+### [→ Download PgLootMaster.exe (latest release)](https://github.com/suceava/pg-loot-master/releases/latest/download/PgLootMaster.exe)
+
 Works with all three match-3 vendors:
 - **Loot Master**
 - **Cashfall**
@@ -13,10 +15,11 @@ Works with all three match-3 vendors:
 
 ## Install
 
-1. Download the latest **`PgLootMaster.exe`** from [Releases](https://github.com/suceava/pg-loot-master/releases). One file, ~270 MB (bundled Windows runtime + everything it needs).
-2. Save it anywhere on disk. No installer, no zip — that one file is the whole app.
-3. Run Project: Gorgon in **borderless windowed** mode. Exclusive fullscreen blocks the tool from seeing the screen.
-4. Double-click `PgLootMaster.exe`.
+One file, ~270 MB — no installer, no zip, no dependencies. The whole app is inside that exe.
+
+1. Save `PgLootMaster.exe` anywhere on your PC (Desktop is fine).
+2. Run Project: Gorgon in **borderless windowed** mode. Exclusive fullscreen blocks the tool from seeing the screen.
+3. Double-click `PgLootMaster.exe`.
    - First launch shows a SmartScreen warning ("Windows protected your PC") because the exe isn't code-signed. Click **More info** → **Run anyway**. One-time.
 
 ### Requirements
