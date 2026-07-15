@@ -9,8 +9,18 @@ public sealed class CaptureCoordinator : IDisposable
     private WindowCapture? _capture;
     private IntPtr _captureHandle;
     private bool _disposed;
+    // Latest known GAME CLIENT rect (from GetClientRect, no window chrome). Needed by
+    // downstream frame handlers because Windows.Graphics.Capture returns the full window
+    // buffer INCLUDING the OS title bar + borders — the client dimensions here let the
+    // handler crop back to just the game render area.
+    private GameWindowRect? _lastClientRect;
 
     public event Action<OpenCvMat>? FrameArrived;
+
+    public GameWindowRect? LastClientRect
+    {
+        get { lock (_lock) return _lastClientRect; }
+    }
 
     public CaptureCoordinator(GameWindowTracker tracker)
     {
@@ -21,6 +31,8 @@ public sealed class CaptureCoordinator : IDisposable
 
     private void OnGameWindowChanged(IntPtr handle, GameWindowRect rect)
     {
+        lock (_lock) { _lastClientRect = rect; }
+
         WindowCapture? oldCapture = null;
         WindowCapture? newCapture = null;
         lock (_lock)
@@ -68,6 +80,7 @@ public sealed class CaptureCoordinator : IDisposable
             toDispose = _capture;
             _capture = null;
             _captureHandle = IntPtr.Zero;
+            _lastClientRect = null;
         }
         if (toDispose is not null)
         {

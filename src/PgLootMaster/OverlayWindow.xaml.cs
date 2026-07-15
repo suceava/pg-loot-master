@@ -122,6 +122,24 @@ public partial class OverlayWindow : Window
     };
     private const int MinAcceptableClusters = 3;
 
+    // Frame normalization. PG's UI uses Unity's "Match Width or Height" canvas scaler at
+    // blend 0.5, which scales UI features by sqrt(actualPixels / referencePixels). Every
+    // captured frame is (a) cropped to the client area (WGC returns the full window buffer
+    // INCLUDING the OS title bar + borders, which offsets everything), then (b) resized to
+    // reference client dimensions so all hardcoded pixel constants (SidebarOffsetXFromTitle
+    // =950, IconBandRightFromSidebar=75, etc.) keep working unchanged in normalized space.
+    // 4K users hit the fast path (scale == 1, no resize).
+    // Reference client area = 4K native minus the ~standard chrome (roughly 3840×2160 in
+    // borderless / fullscreen). Constants were calibrated against captures at exactly this.
+    private const int NormalizedReferenceWidth = 3840;
+    private const int NormalizedReferenceHeight = 2160;
+    private double _currentFrameScale = 1.0;
+    // Log the normalize decision once per (raw dim, client dim) combination so a resolution
+    // change (new user reports issue, window resized) always leaves a fresh trace in the
+    // log — but we don't spam every frame at 60Hz.
+    private bool _logNormalizeOnce;
+    private (int rawW, int rawH, int cliW, int cliH) _lastNormalizeLogged;
+
     private IReadOnlyList<OpenCvSharp.Rect> _latestCells = Array.Empty<OpenCvSharp.Rect>();
     private int[] _latestClusterIds = Array.Empty<int>();
     private IReadOnlyList<OpenCvSharp.Rect> _displayedCells = Array.Empty<OpenCvSharp.Rect>();
@@ -152,6 +170,9 @@ public partial class OverlayWindow : Window
         _panelLocator = new PanelLocator();
         _captureCoordinator.FrameArrived += OnFrameForPanelDetection;
         OverlayLog.Write($"PanelLocator loaded templates (embedded): {string.Join(", ", _panelLocator.TemplateNames)}");
+        // Log the very first normalize decision so a mis-detected resolution shows up in
+        // the log immediately instead of failing silently as "no panel found".
+        _logNormalizeOnce = true;
 
         // Restore any in-progress game from the previous session. Tracker picks up where it
         // left off; next OnFrame just continues appending turns from the last known one.
@@ -193,7 +214,7 @@ public partial class OverlayWindow : Window
         };
     }
 
-    private void OnFrameForPanelDetection(OpenCvMat frame)
+    private void OnFrameForPanelDetection(OpenCvMat rawFrame)
     {
         DateTime now = DateTime.UtcNow;
         if (now < _nextPanelDetectionUtc) return;
@@ -204,6 +225,86 @@ public partial class OverlayWindow : Window
         long tStart = sw.ElapsedMilliseconds;
         long tLocator = 0, tCells = 0, tSidebar = 0, tCluster = 0, tSplit = 0, tLabel = 0,
              tSolve = 0, tGameOver = 0, tDispatch = 0;
+
+        // Normalize:
+        //   1. Crop the raw frame down to the game CLIENT area (WGC captures the whole
+        //      window including OS chrome — title bar + borders — which offsets every UI
+        //      element and breaks fixed pixel constants downstream).
+        //   2. Rescale to the reference client dimensions so all hardcoded pixel constants
+        //      keep working. Scale = sqrt(refArea / clientArea), matching Unity's "Match
+        //      Width or Height" canvas scaler at blend 0.5 (PG's UI scaling formula).
+        // 4K users hit the fast path (scale ≈ 1, no crop needed, no resize).
+        OpenCvMat frame;
+        OpenCvMat? croppedFrame = null;
+        OpenCvMat? resizedFrame = null;
+        GameWindowRect? clientRect = _captureCoordinator.LastClientRect;
+        (int, int, int, int) key = (
+            rawFrame.Cols, rawFrame.Rows,
+            clientRect?.Width ?? 0, clientRect?.Height ?? 0);
+        bool logThisNormalize = _logNormalizeOnce || key != _lastNormalizeLogged;
+        if (clientRect is GameWindowRect cr && cr.Width > 0 && cr.Height > 0
+            && cr.Width <= rawFrame.Cols && cr.Height <= rawFrame.Rows)
+        {
+            // Chrome: WGC captures window buffer with chrome. Client area is centred
+            // horizontally (equal left/right border), pushed down by the title bar. Derive
+            // offsets from the size delta so we don't hardcode Win 11 chrome sizes.
+            int sideOffset = (rawFrame.Cols - cr.Width) / 2;
+            int topOffset = rawFrame.Rows - cr.Height - sideOffset;    // bottom border == side
+            if (topOffset < 0) topOffset = 0;
+            OpenCvSharp.Rect cropRect = new(sideOffset, topOffset, cr.Width, cr.Height);
+            OpenCvMat clientOnly;
+            if (cropRect.X == 0 && cropRect.Y == 0
+                && cropRect.Width == rawFrame.Cols && cropRect.Height == rawFrame.Rows)
+            {
+                clientOnly = rawFrame;
+            }
+            else
+            {
+                croppedFrame = new OpenCvMat(rawFrame, cropRect).Clone();
+                clientOnly = croppedFrame;
+            }
+
+            double refArea = (double)NormalizedReferenceWidth * NormalizedReferenceHeight;
+            double clientArea = (double)clientOnly.Cols * clientOnly.Rows;
+            double scale = Math.Sqrt(refArea / clientArea);
+            if (scale > 0.995 && scale < 1.005)
+            {
+                frame = clientOnly;
+                _currentFrameScale = 1.0;
+            }
+            else
+            {
+                int nw = (int)Math.Round(clientOnly.Cols * scale);
+                int nh = (int)Math.Round(clientOnly.Rows * scale);
+                resizedFrame = new OpenCvMat();
+                OpenCvSharp.Cv2.Resize(clientOnly, resizedFrame,
+                    new OpenCvSharp.Size(nw, nh), 0, 0,
+                    scale >= 1.0 ? OpenCvSharp.InterpolationFlags.Cubic
+                                 : OpenCvSharp.InterpolationFlags.Area);
+                frame = resizedFrame;
+                _currentFrameScale = scale;
+            }
+            if (logThisNormalize)
+            {
+                OverlayLog.Write($"Normalize: raw={rawFrame.Cols}x{rawFrame.Rows} " +
+                    $"client={cr.Width}x{cr.Height} cropOffset=({sideOffset},{topOffset}) " +
+                    $"scale={_currentFrameScale:F3} normalized={frame.Cols}x{frame.Rows}");
+                _lastNormalizeLogged = key;
+                _logNormalizeOnce = false;
+            }
+        }
+        else
+        {
+            // No client rect yet — use raw frame as-is. Pipeline may fail template match
+            // pre-normalization, but this is a transient state (first few frames).
+            frame = rawFrame;
+            _currentFrameScale = 1.0;
+            if (logThisNormalize)
+            {
+                OverlayLog.Write($"Normalize SKIPPED (no client rect yet): raw={rawFrame.Cols}x{rawFrame.Rows}");
+                _lastNormalizeLogged = key;
+            }
+        }
 
         PanelLocation? loc;
         IReadOnlyList<OpenCvSharp.Rect> cells = Array.Empty<OpenCvSharp.Rect>();
@@ -430,7 +531,11 @@ public partial class OverlayWindow : Window
                     _turnCounts, _turnCaptured, _latestSidebarItems);
             }
 
-            _displayedCells = cells;
+            // Vision ran in normalized 2160-height space; the overlay draws over the native
+            // PG window, so denormalize the cell rects back to raw window coords here so
+            // DrawSwapHighlight puts the pink boxes on the right physical tiles. Fast path
+            // for 4K users: scale == 1 → the divide is a no-op.
+            _displayedCells = DenormalizeCells(cells, _currentFrameScale);
             _displayedClusterIds = _latestClusterIds;
             long tBeforeSolve = sw.ElapsedMilliseconds;
             _displayedRecommendation = TrySolve(_latestClusterIds);
@@ -558,6 +663,8 @@ public partial class OverlayWindow : Window
                 + $"cluster={tCluster}  split={tSplit}  label={tLabel}  solve={tSolve}  "
                 + $"gameOver={tGameOver}  dispatch={tDispatch}");
         }
+        resizedFrame?.Dispose();
+        croppedFrame?.Dispose();
     }
 
     private void DrawSuggestion(DpiScale dpi)
@@ -580,6 +687,26 @@ public partial class OverlayWindow : Window
         DrawSwapHighlight(b, highlightBrush, dpi);
 
         SuggestionCanvas.Visibility = Visibility.Visible;
+    }
+
+    // Divide normalized (2160-height) cell rects by scale to project them back to the
+    // native window's pixel coord space. At scale == 1 this returns the input unchanged
+    // (no allocation) so 4K users pay nothing.
+    private static IReadOnlyList<OpenCvSharp.Rect> DenormalizeCells(
+        IReadOnlyList<OpenCvSharp.Rect> cells, double scale)
+    {
+        if (scale > 0.9999 && scale < 1.0001) return cells;
+        var result = new OpenCvSharp.Rect[cells.Count];
+        for (int i = 0; i < cells.Count; i++)
+        {
+            OpenCvSharp.Rect c = cells[i];
+            result[i] = new OpenCvSharp.Rect(
+                (int)Math.Round(c.X / scale),
+                (int)Math.Round(c.Y / scale),
+                (int)Math.Round(c.Width / scale),
+                (int)Math.Round(c.Height / scale));
+        }
+        return result;
     }
 
     private void DrawSwapHighlight(OpenCvSharp.Rect cell, Brush brush, DpiScale dpi)
