@@ -30,6 +30,11 @@ public partial class ToolbarWindow : Window
         _historyStore = historyStore;
         Left = OverlaySettings.Instance.ToolbarLeft;
         Top = OverlaySettings.Instance.ToolbarTop;
+        // Version chip on the far right of the top row. Assembly version comes from the
+        // <Version> in PgLootMaster.csproj (bumped per release). Format as "v1.4.0" —
+        // drop the .0 revision that .NET always tacks on.
+        System.Version? ver = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+        VersionText.Text = ver is null ? "" : $"v{ver.Major}.{ver.Minor}.{ver.Build}";
         RefreshStrategyChip();
         OverlaySettings.Instance.PropertyChanged += (_, args) =>
         {

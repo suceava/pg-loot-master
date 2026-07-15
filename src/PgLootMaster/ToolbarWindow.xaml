@@ -46,6 +46,12 @@
                         Background="#FF802020"
                         Foreground="White"
                         Click="OnCloseClick" />
+                <TextBlock x:Name="VersionText"
+                           Foreground="#FF888888"
+                           FontFamily="Consolas"
+                           FontSize="11"
+                           VerticalAlignment="Center"
+                           Margin="8,0,2,0" />
             </StackPanel>
 
             <!-- Row 2: strategy + current state + per-strategy comparisons -->

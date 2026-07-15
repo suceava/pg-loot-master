@@ -28,6 +28,15 @@ Start-Sleep -Seconds 1
 if (Test-Path $publishDir) { Remove-Item $publishDir -Recurse -Force }
 if (Test-Path $distDir) { Remove-Item $distDir -Recurse -Force }
 
+# If -Release is set, derive an assembly version from the tag (strip the leading 'v') and
+# stamp it on the exe. Belt-and-suspenders: the csproj's <Version> should already match the
+# tag, but this ensures the shipped .exe's assembly version can't drift from the git tag.
+$versionArg = @()
+if ($Release) {
+    $ver = $Release -replace '^v', ''
+    $versionArg = @("-p:Version=$ver")
+}
+
 dotnet publish (Join-Path $root 'src\PgLootMaster\PgLootMaster.csproj') `
     -c Release `
     -r win-x64 `
@@ -36,6 +45,7 @@ dotnet publish (Join-Path $root 'src\PgLootMaster\PgLootMaster.csproj') `
     -p:IncludeNativeLibrariesForSelfExtract=true `
     -p:DebugType=None `
     -p:DebugSymbols=false `
+    @versionArg `
     --nologo
 
 if ($LASTEXITCODE -ne 0) { throw "Publish failed" }
