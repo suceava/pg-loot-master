@@ -17,6 +17,29 @@ public sealed class DebugFrameSink
         _directory = directory;
         _interval = interval;
         _maxFrames = maxFrames;
+
+        // Clear any frames left behind by previous sessions. The per-session cap only
+        // protects THIS run — without cleanup, running the tool N times would leave
+        // N × maxFrames frames on disk (a few GB after enough sessions, which shipped as
+        // a real bug before this fix). Each session starts with an empty folder so total
+        // disk usage stays bounded at roughly maxFrames × frame size.
+        try
+        {
+            if (Directory.Exists(_directory))
+            {
+                int deleted = 0;
+                foreach (string old in Directory.EnumerateFiles(_directory, "frame-*.png"))
+                {
+                    try { File.Delete(old); deleted++; } catch { }
+                }
+                if (deleted > 0)
+                    DebugLog.Write($"DebugFrameSink: cleared {deleted} old frame(s) from {_directory}");
+            }
+        }
+        catch (Exception ex)
+        {
+            DebugLog.Write($"DebugFrameSink: cleanup failed: {ex.GetType().Name}: {ex.Message}");
+        }
     }
 
     public void Accept(OpenCvMat frame)
