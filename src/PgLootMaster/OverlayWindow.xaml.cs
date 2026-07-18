@@ -150,7 +150,11 @@ public partial class OverlayWindow : Window
 
     public OverlayWindow()
     {
-        OverlayLog.Write("OverlayWindow ctor");
+        // Log app version at startup so a user's log file conclusively identifies the
+        // build they're running — bug reports otherwise depend on the user reading the
+        // version chip on the toolbar, which they usually can't remember.
+        System.Version? appVer = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
+        OverlayLog.Write($"OverlayWindow ctor — app v{appVer?.Major}.{appVer?.Minor}.{appVer?.Build}");
         InitializeComponent();
 
         OverlaySettings.Instance.PropertyChanged += (_, _) => Dispatcher.Invoke(ApplySettings);
@@ -242,6 +246,11 @@ public partial class OverlayWindow : Window
             rawFrame.Cols, rawFrame.Rows,
             clientRect?.Width ?? 0, clientRect?.Height ?? 0);
         bool logThisNormalize = _logNormalizeOnce || key != _lastNormalizeLogged;
+        // Wrap the normalize in try/catch so any silent OpenCV exception (e.g., unexpected
+        // pixel format on a specific driver, boundary math off-by-one on the user's frame
+        // size) becomes a visible log line instead of getting swallowed by WGC's event
+        // dispatcher and looking like "OnFrameForPanelDetection never ran."
+        try {
         if (clientRect is GameWindowRect cr && cr.Width > 0 && cr.Height > 0
             && cr.Width <= rawFrame.Cols && cr.Height <= rawFrame.Rows)
         {
@@ -295,15 +304,25 @@ public partial class OverlayWindow : Window
         }
         else
         {
-            // No client rect yet — use raw frame as-is. Pipeline may fail template match
-            // pre-normalization, but this is a transient state (first few frames).
+            // Either no client rect yet, or the client rect is bigger than the raw frame
+            // (WGC frame pool locked at a small initial size). Either way, skip normalize
+            // and pass the raw frame through — WGC pool auto-recreate should catch up on
+            // the next frame (see WindowCapture.OnFrameArrived's Recreate logic).
             frame = rawFrame;
             _currentFrameScale = 1.0;
             if (logThisNormalize)
             {
-                OverlayLog.Write($"Normalize SKIPPED (no client rect yet): raw={rawFrame.Cols}x{rawFrame.Rows}");
+                OverlayLog.Write($"Normalize SKIPPED: raw={rawFrame.Cols}x{rawFrame.Rows} clientRect={clientRect?.ToString() ?? "null"}");
                 _lastNormalizeLogged = key;
             }
+        }
+        }
+        catch (Exception ex)
+        {
+            OverlayLog.Write($"Normalize THREW {ex.GetType().Name}: {ex.Message} — raw={rawFrame.Cols}x{rawFrame.Rows} clientRect={clientRect}");
+            croppedFrame?.Dispose();
+            resizedFrame?.Dispose();
+            return;
         }
 
         PanelLocation? loc;

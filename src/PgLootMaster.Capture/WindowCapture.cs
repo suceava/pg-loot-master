@@ -26,6 +26,12 @@ public sealed class WindowCapture : IDisposable
     private readonly GraphicsCaptureSession _session;
     private Texture2D? _stagingTexture;
     private SizeInt32 _stagingSize;
+    // WGC creates the frame pool at item.Size when capture starts and NEVER resizes it on
+    // its own — even after the target window resizes/maximizes. That means a capture
+    // started while PG was minimized (item.Size ≈ 199×34) keeps delivering 199×34 frames
+    // forever, even when PG later maximises to 1920×1080. OnFrameArrived compares each
+    // frame's contentSize against this and calls framePool.Recreate when they diverge.
+    private SizeInt32 _poolSize;
     private bool _disposed;
 
     public event Action<OpenCvMat>? FrameArrived;
@@ -74,6 +80,7 @@ public sealed class WindowCapture : IDisposable
         GraphicsCaptureSession session = framePool.CreateCaptureSession(item);
 
         WindowCapture capture = new(d3dDevice, winrtDevice, item, framePool, session);
+        capture._poolSize = initialSize;
         try
         {
             session.IsCursorCaptureEnabled = false;
@@ -106,6 +113,29 @@ public sealed class WindowCapture : IDisposable
             }
 
             SizeInt32 contentSize = frame.ContentSize;
+            // If the window has resized since capture started, the WGC pool is still at the
+            // OLD size and this frame is clipped to it. Recreate the pool to match the new
+            // content dimensions; skip this frame and pick up the next one at the new size.
+            // Handles: PG minimised at app-start (pool=199×34) then maximised → 1920×1080,
+            // and mid-game resolution changes without needing to restart the app.
+            if (contentSize.Width > 0 && contentSize.Height > 0
+                && (contentSize.Width != _poolSize.Width || contentSize.Height != _poolSize.Height))
+            {
+                SizeInt32 oldSize = _poolSize;
+                try
+                {
+                    sender.Recreate(_winrtDevice, DirectXPixelFormat.B8G8R8A8UIntNormalized,
+                                    FrameBufferCount, contentSize);
+                    _poolSize = contentSize;
+                    DebugLog.Write($"WindowCapture pool recreated: {oldSize.Width}x{oldSize.Height} -> {contentSize.Width}x{contentSize.Height}");
+                }
+                catch (Exception ex)
+                {
+                    DebugLog.Write($"WindowCapture pool Recreate threw: {ex.GetType().Name}: {ex.Message}");
+                }
+                return;
+            }
+
             using Texture2D gpuTexture = CaptureInterop.GetSharpDxTexture(frame.Surface);
             Texture2DDescription gpuDesc = gpuTexture.Description;
 
