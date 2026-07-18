@@ -72,6 +72,11 @@ public partial class OverlayWindow : Window
     // Set by App.OnStartup so the overlay can push live-comparison snapshots to the toolbar
     // without holding a direct reference to ToolbarWindow. Null = no active game / no history.
     public Action<LiveComparisonSnapshot?>? OnLiveComparisonChanged { get; set; }
+    // Set by App startup so the Toolbar's diagnostics panel can receive per-frame capture
+    // state (thumbnail + status line). Only pushed when the ShowDiagnostics setting is on
+    // — the snapshot cost (Cv2 resize + PNG encode) is not paid otherwise.
+    public Action<DiagnosticsSnapshot>? OnDiagnosticsChanged { get; set; }
+    private DateTime _nextDiagnosticsPushUtc;
     // Set by App.OnStartup so the overlay can push the Target Hunter lock status to the
     // toolbar: (lock status, target name, mode detail e.g. "RACING" / null).
     public Action<TargetLockStatus, string?, string?>? OnTargetLockChanged { get; set; }
@@ -682,8 +687,66 @@ public partial class OverlayWindow : Window
                 + $"cluster={tCluster}  split={tSplit}  label={tLabel}  solve={tSolve}  "
                 + $"gameOver={tGameOver}  dispatch={tDispatch}");
         }
+
+        // Diagnostics push: thumbnail + one-line state summary → toolbar's Diagnostics
+        // panel. Throttled to 500 ms so we don't pay the resize+PNG cost every frame, and
+        // only runs when the setting is on so normal users pay zero cost. All the data a
+        // bug reporter needs shows up in one toolbar screenshot.
+        if (OnDiagnosticsChanged is not null
+            && OverlaySettings.Instance.ShowDiagnostics
+            && DateTime.UtcNow >= _nextDiagnosticsPushUtc)
+        {
+            _nextDiagnosticsPushUtc = DateTime.UtcNow.AddMilliseconds(500);
+            try
+            {
+                DiagnosticsSnapshot snap = BuildDiagnosticsSnapshot(rawFrame, clientRect, loc, cells);
+                var cb = OnDiagnosticsChanged;
+                Dispatcher.BeginInvoke(() => cb?.Invoke(snap));
+            }
+            catch (Exception ex)
+            {
+                OverlayLog.Write($"Diagnostics snapshot threw: {ex.GetType().Name}: {ex.Message}");
+            }
+        }
+
         resizedFrame?.Dispose();
         croppedFrame?.Dispose();
+    }
+
+    private DiagnosticsSnapshot BuildDiagnosticsSnapshot(
+        OpenCvMat rawFrame,
+        GameWindowRect? clientRect,
+        PanelLocation? loc,
+        IReadOnlyList<OpenCvSharp.Rect> cells)
+    {
+        // Small thumbnail — max 200 px wide, preserving aspect ratio. Works whether the raw
+        // frame is 199×34 (WGC pool stuck small) or 1920×1080 (working). The size of the
+        // returned image itself is diagnostic: a 200×~34 sliver in the toolbar tells you at
+        // a glance that WGC is capturing a wrong-shaped buffer.
+        const int MaxThumbWidth = 200;
+        int tw = Math.Min(MaxThumbWidth, rawFrame.Cols);
+        int th = rawFrame.Cols > 0
+            ? Math.Max(1, (int)Math.Round(rawFrame.Rows * (double)tw / rawFrame.Cols))
+            : 1;
+        using OpenCvMat thumb = new();
+        OpenCvSharp.Cv2.Resize(rawFrame, thumb, new OpenCvSharp.Size(tw, th), 0, 0,
+            OpenCvSharp.InterpolationFlags.Area);
+        // BGRA (from WGC) → BGR before PNG encode so the Image control renders correct colours.
+        using OpenCvMat thumbBgr = new();
+        if (thumb.Channels() == 4)
+            OpenCvSharp.Cv2.CvtColor(thumb, thumbBgr, OpenCvSharp.ColorConversionCodes.BGRA2BGR);
+        else
+            thumb.CopyTo(thumbBgr);
+        OpenCvSharp.Cv2.ImEncode(".png", thumbBgr, out byte[] pngBytes);
+
+        string clientText = clientRect is GameWindowRect cr2 ? $"{cr2.Width}x{cr2.Height}" : "null";
+        string panelText = loc is PanelLocation p
+            ? $"{p.TemplateName} at ({p.TitleBar.X},{p.TitleBar.Y}) conf={p.Confidence:F2}"
+            : "NOT DETECTED";
+        string status = $"raw={rawFrame.Cols}x{rawFrame.Rows}  client={clientText}  "
+            + $"scale={_currentFrameScale:F2}  panel={panelText}  cells={cells.Count}  "
+            + $"items={_latestSidebarItems.Count}";
+        return new DiagnosticsSnapshot(pngBytes, status);
     }
 
     private void DrawSuggestion(DpiScale dpi)
@@ -1527,3 +1590,8 @@ public sealed record LiveComparisonSnapshot(
     int Score,
     int CurrentStrategy,
     PerStrategyStats[] PerStrategy);
+
+/// <summary>Per-frame capture diagnostics for the toolbar's Diagnostics panel. Bundles a
+/// PNG thumbnail of the raw captured frame + a compact status line so a bug reporter can
+/// screenshot the toolbar and hand over the entire capture state in one image.</summary>
+public sealed record DiagnosticsSnapshot(byte[] ThumbnailPng, string StatusLine);

@@ -29,6 +29,7 @@ public partial class SettingsWindow : Window
         ShowBoardOverlayCheckBox.IsChecked = OverlaySettings.Instance.ShowBoardOverlay;
         ShowDebugTextWindowCheckBox.IsChecked = OverlaySettings.Instance.ShowDebugTextWindow;
         ShowSwapHighlightCheckBox.IsChecked = OverlaySettings.Instance.ShowSwapHighlight;
+        ShowDiagnosticsCheckBox.IsChecked = OverlaySettings.Instance.ShowDiagnostics;
         int idx = OverlaySettings.Instance.SolverStrategy;
         if (idx < 0 || idx >= StrategyComboBox.Items.Count) idx = 5;   // Cascade Aggressive
         StrategyComboBox.SelectedIndex = idx;
@@ -100,6 +101,11 @@ public partial class SettingsWindow : Window
     private void OnShowSwapHighlightChanged(object sender, RoutedEventArgs e)
     {
         OverlaySettings.Instance.ShowSwapHighlight = ShowSwapHighlightCheckBox.IsChecked == true;
+    }
+
+    private void OnShowDiagnosticsChanged(object sender, RoutedEventArgs e)
+    {
+        OverlaySettings.Instance.ShowDiagnostics = ShowDiagnosticsCheckBox.IsChecked == true;
     }
 
     private void OnRecomputeClustersClick(object sender, RoutedEventArgs e)

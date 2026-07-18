@@ -36,11 +36,42 @@ public partial class ToolbarWindow : Window
         System.Version? ver = System.Reflection.Assembly.GetExecutingAssembly().GetName().Version;
         VersionText.Text = ver is null ? "" : $"v{ver.Major}.{ver.Minor}.{ver.Build}";
         RefreshStrategyChip();
+        DiagnosticsPanel.Visibility = OverlaySettings.Instance.ShowDiagnostics
+            ? Visibility.Visible : Visibility.Collapsed;
         OverlaySettings.Instance.PropertyChanged += (_, args) =>
         {
             if (args.PropertyName == nameof(OverlaySettings.SolverStrategy))
                 Dispatcher.Invoke(RefreshStrategyChip);
+            else if (args.PropertyName == nameof(OverlaySettings.ShowDiagnostics))
+                Dispatcher.Invoke(() =>
+                {
+                    DiagnosticsPanel.Visibility = OverlaySettings.Instance.ShowDiagnostics
+                        ? Visibility.Visible : Visibility.Collapsed;
+                });
         };
+    }
+
+    /// <summary>Called from OverlayWindow (via App.OnDiagnosticsChanged) whenever a fresh
+    /// capture-diagnostics snapshot is ready. Renders the thumbnail + status line into the
+    /// Diagnostics panel. Cheap: PNG decode + text update on the UI thread.</summary>
+    public void UpdateDiagnostics(DiagnosticsSnapshot snap)
+    {
+        if (snap.ThumbnailPng is null || snap.ThumbnailPng.Length == 0) return;
+        try
+        {
+            System.Windows.Media.Imaging.BitmapImage bmp = new();
+            bmp.BeginInit();
+            bmp.CacheOption = System.Windows.Media.Imaging.BitmapCacheOption.OnLoad;
+            bmp.StreamSource = new System.IO.MemoryStream(snap.ThumbnailPng);
+            bmp.EndInit();
+            bmp.Freeze();
+            DiagnosticsThumbnail.Source = bmp;
+            DiagnosticsStatusText.Text = snap.StatusLine;
+        }
+        catch
+        {
+            // Diagnostic aid — never let a bad PNG take out the toolbar.
+        }
     }
 
     private void RefreshStrategyChip()

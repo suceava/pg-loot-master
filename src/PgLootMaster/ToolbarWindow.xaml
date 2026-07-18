@@ -130,6 +130,43 @@
                                Visibility="Collapsed" />
                 </StackPanel>
             </Border>
+
+            <!-- Diagnostics panel: hidden unless "Show diagnostics" is enabled in Settings.
+                 One glance tells you the whole capture state: what pixels the tool actually
+                 sees (thumbnail) + all the key numbers (raw/client dims, scale, panel
+                 detection, cell count). A bug reporter screenshots the toolbar and the
+                 whole story is in one image. -->
+            <Border x:Name="DiagnosticsPanel"
+                    BorderBrush="#FF333333"
+                    BorderThickness="0,1,0,0"
+                    Margin="0,8,0,0"
+                    Padding="0,8,0,2"
+                    Visibility="Collapsed">
+                <StackPanel Orientation="Vertical">
+                    <TextBlock Text="DIAGNOSTICS"
+                               Foreground="#FFAAAAAA"
+                               FontFamily="Consolas"
+                               FontSize="10"
+                               FontWeight="Bold"
+                               Margin="2,0,0,4" />
+                    <Border BorderBrush="#FF444444"
+                            BorderThickness="1"
+                            Background="#FF111111"
+                            HorizontalAlignment="Left">
+                        <Image x:Name="DiagnosticsThumbnail"
+                               Stretch="None"
+                               HorizontalAlignment="Left"
+                               VerticalAlignment="Top" />
+                    </Border>
+                    <TextBlock x:Name="DiagnosticsStatusText"
+                               Foreground="#FFCCCCCC"
+                               FontFamily="Consolas"
+                               FontSize="11"
+                               TextWrapping="Wrap"
+                               Margin="2,4,0,0"
+                               Text="(waiting for first frame…)" />
+                </StackPanel>
+            </Border>
         </StackPanel>
     </Border>
 </Window>

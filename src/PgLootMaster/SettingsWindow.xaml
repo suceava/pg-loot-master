@@ -90,6 +90,12 @@
                   Margin="0,4"
                   Checked="OnShowDebugTextWindowChanged"
                   Unchecked="OnShowDebugTextWindowChanged" />
+        <CheckBox x:Name="ShowDiagnosticsCheckBox"
+                  Content="Show diagnostics on toolbar (live thumbnail + capture state — for bug reports)"
+                  Foreground="White"
+                  Margin="0,4"
+                  Checked="OnShowDiagnosticsChanged"
+                  Unchecked="OnShowDiagnosticsChanged" />
         <Button x:Name="RecomputeClustersButton"
                 Content="Recompute clusters"
                 Width="180"

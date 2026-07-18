@@ -40,6 +40,17 @@ public sealed class OverlaySettings : INotifyPropertyChanged
         set => Set(ref _showSwapHighlight, value);
     }
 
+    // Diagnostics panel on the toolbar: live thumbnail of the captured frame + a status
+    // line with raw dims, client dims, scale, panel-detection state. Off by default; users
+    // don't need it. Turned on for bug reports — a screenshot of the toolbar tells the
+    // whole capture story in one image without needing log parsing.
+    private bool _showDiagnostics = false;
+    public bool ShowDiagnostics
+    {
+        get => _showDiagnostics;
+        set => Set(ref _showDiagnostics, value);
+    }
+
     private double _toolbarLeft = 40;
     public double ToolbarLeft
     {
@@ -104,6 +115,7 @@ public sealed class OverlaySettings : INotifyPropertyChanged
                     settings.ShowBoardOverlay = loaded.ShowBoardOverlay;
                     settings.ShowDebugTextWindow = loaded.ShowDebugTextWindow;
                     settings.ShowSwapHighlight = loaded.ShowSwapHighlight;
+                    settings.ShowDiagnostics = loaded.ShowDiagnostics;
                     settings.ToolbarLeft = loaded.ToolbarLeft;
                     settings.ToolbarTop = loaded.ToolbarTop;
                     settings.TargetItemName = loaded.TargetItemName;
