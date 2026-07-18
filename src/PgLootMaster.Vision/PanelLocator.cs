@@ -22,6 +22,16 @@ public sealed class PanelLocator : IDisposable
     // tight enough that the local match is ~1 ms vs ~600 ms full-frame.
     private const int LocalSearchPadding = 80;
 
+    // Preprocessing before template match: BGR → grayscale → GaussianBlur(BlurKernel).
+    // Why: raw color CCoeffNormed is fragile to sub-visible rendering differences (Unity
+    // texture-filtering quality, ClearType/font-hinting settings, GPU driver differences).
+    // At identical resolution and DPI, one machine can score 0.92 while another scores 0.52
+    // on the same panel — same visible text, different pixels. Grayscale strips ClearType
+    // colour fringes; the blur softens hinting/rasterisation differences. Tuned empirically
+    // against the 2026-07-18 mismatch: Ultra-quality captures still score >0.9 while
+    // downgraded-quality captures pass the 0.65 threshold with room to spare.
+    private const int BlurKernel = 7;
+
     /// <summary>
     /// Construct from panel-title templates embedded in this assembly as manifest resources
     /// (the samples/templates/panel-title*.png files are compiled in via EmbeddedResource in
@@ -29,7 +39,7 @@ public sealed class PanelLocator : IDisposable
     /// Templates\ folder next to the exe. Each frame is matched against every template; the
     /// highest-confidence match above threshold wins.
     /// </summary>
-    public PanelLocator(double matchThreshold = 0.7)
+    public PanelLocator(double matchThreshold = 0.65)
     {
         List<OpenCvMat> templates = new();
         List<string> names = new();
@@ -46,10 +56,10 @@ public sealed class PanelLocator : IDisposable
             if (s is null) continue;
             using MemoryStream ms = new();
             s.CopyTo(ms);
-            OpenCvMat t = Cv2.ImDecode(ms.ToArray(), ImreadModes.Color);
-            if (t.Empty()) continue;
+            using OpenCvMat colorTpl = Cv2.ImDecode(ms.ToArray(), ImreadModes.Color);
+            if (colorTpl.Empty()) continue;
 
-            templates.Add(t);
+            templates.Add(Preprocess(colorTpl));
             // Recover the file name minus extension: "panel-title-deluxe".
             string fileName = resName.Substring(ResourcePrefix.Length);
             int dot = fileName.LastIndexOf('.');
@@ -70,7 +80,7 @@ public sealed class PanelLocator : IDisposable
     /// which point at samples/templates/ on disk. If a directory, loads every
     /// "panel-title*.png" template found inside. If a file, loads just that one.
     /// </summary>
-    public PanelLocator(string templatePathOrDir, double matchThreshold = 0.7)
+    public PanelLocator(string templatePathOrDir, double matchThreshold = 0.65)
     {
         List<OpenCvMat> templates = new();
         List<string> names = new();
@@ -79,10 +89,10 @@ public sealed class PanelLocator : IDisposable
         {
             foreach (string file in Directory.EnumerateFiles(templatePathOrDir, "panel-title*.png"))
             {
-                OpenCvMat t = Cv2.ImRead(file, ImreadModes.Color);
-                if (!t.Empty())
+                using OpenCvMat colorTpl = Cv2.ImRead(file, ImreadModes.Color);
+                if (!colorTpl.Empty())
                 {
-                    templates.Add(t);
+                    templates.Add(Preprocess(colorTpl));
                     names.Add(Path.GetFileNameWithoutExtension(file));
                 }
             }
@@ -96,20 +106,20 @@ public sealed class PanelLocator : IDisposable
             {
                 foreach (string file in Directory.EnumerateFiles(dir, "panel-title*.png"))
                 {
-                    OpenCvMat t = Cv2.ImRead(file, ImreadModes.Color);
-                    if (!t.Empty())
+                    using OpenCvMat colorTpl = Cv2.ImRead(file, ImreadModes.Color);
+                    if (!colorTpl.Empty())
                     {
-                        templates.Add(t);
+                        templates.Add(Preprocess(colorTpl));
                         names.Add(Path.GetFileNameWithoutExtension(file));
                     }
                 }
             }
             else
             {
-                OpenCvMat t = Cv2.ImRead(templatePathOrDir, ImreadModes.Color);
-                if (!t.Empty())
+                using OpenCvMat colorTpl = Cv2.ImRead(templatePathOrDir, ImreadModes.Color);
+                if (!colorTpl.Empty())
                 {
-                    templates.Add(t);
+                    templates.Add(Preprocess(colorTpl));
                     names.Add(Path.GetFileNameWithoutExtension(templatePathOrDir));
                 }
             }
@@ -123,6 +133,17 @@ public sealed class PanelLocator : IDisposable
         _matchThreshold = matchThreshold;
     }
 
+    /// <summary>BGR → grayscale → Gaussian blur. Both templates (at load) and each incoming
+    /// frame (per TryLocate) run through this so the match sees the same preprocessed
+    /// pixels on both sides. See BlurKernel constant for rationale.</summary>
+    private static OpenCvMat Preprocess(OpenCvMat bgr)
+    {
+        OpenCvMat gray = new();
+        Cv2.CvtColor(bgr, gray, ColorConversionCodes.BGR2GRAY);
+        Cv2.GaussianBlur(gray, gray, new OpenCvSharp.Size(BlurKernel, BlurKernel), 0);
+        return gray;
+    }
+
     public IReadOnlyList<string> TemplateNames => _templateNames;
 
     public PanelLocation? TryLocate(OpenCvMat frame)
@@ -130,16 +151,19 @@ public sealed class PanelLocator : IDisposable
         ObjectDisposedException.ThrowIf(_disposed, this);
         if (frame.Empty()) return null;
 
-        OpenCvMat frameForMatch = frame;
+        // Preprocess the incoming frame the same way the templates were preprocessed at
+        // load: BGR/BGRA → grayscale → GaussianBlur(BlurKernel). See BlurKernel field.
         OpenCvMat? converted = null;
+        OpenCvMat frameForMatch;
         try
         {
-            if (frame.Channels() == 4)
-            {
-                converted = new OpenCvMat();
-                Cv2.CvtColor(frame, converted, ColorConversionCodes.BGRA2BGR);
-                frameForMatch = converted;
-            }
+            converted = new OpenCvMat();
+            ColorConversionCodes toGray = frame.Channels() == 4
+                ? ColorConversionCodes.BGRA2GRAY
+                : ColorConversionCodes.BGR2GRAY;
+            Cv2.CvtColor(frame, converted, toGray);
+            Cv2.GaussianBlur(converted, converted, new OpenCvSharp.Size(BlurKernel, BlurKernel), 0);
+            frameForMatch = converted;
 
             // Fast path: if we have a previous hit, search a ±LocalSearchPadding window
             // around it for the SAME template. ~1 ms vs ~600 ms full-frame.

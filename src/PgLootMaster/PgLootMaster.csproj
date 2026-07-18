@@ -20,7 +20,7 @@
     <!-- App version. Displayed in the toolbar and stamped into the assembly. Bump this
          before cutting a release; publish.ps1 will also inject the version from -Release
          so the shipped exe always matches the git tag. -->
-    <Version>1.4.4</Version>
+    <Version>1.4.5</Version>
     <!-- Ship only the English satellite (resources) — every other language pack is dead
          weight for this Windows-only English app. This alone shaves ~15-25 MB off the
          single-file exe (WPF, .NET base, OpenCvSharp all ship 20+ localised resource
