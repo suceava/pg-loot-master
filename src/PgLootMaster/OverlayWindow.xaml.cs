@@ -986,9 +986,11 @@ public partial class OverlayWindow : Window
 
     public static string MapTemplateToStyle(string templateName)
     {
-        // "panel-title"          -> "Loot Master"
-        // "panel-title-cashfall"  -> "Cashfall"
-        // anything else          -> titlecase of suffix after "panel-title-", or the raw name
+        // "panel-title"            -> "Loot Master"
+        // "panel-title-cashfall"   -> "Cashfall"
+        // "panel-title-seaofgems"  -> "Sea of Gems"   (multi-word: needs an explicit entry,
+        //                             the titlecase fallback would give "Seaofgems")
+        // anything else            -> titlecase of suffix after "panel-title-", or the raw name
         if (string.IsNullOrEmpty(templateName)) return "Unknown";
         if (templateName == "panel-title") return "Loot Master";
         const string prefix = "panel-title-";
@@ -996,6 +998,7 @@ public partial class OverlayWindow : Window
         {
             string suffix = templateName.Substring(prefix.Length);
             if (suffix.Length == 0) return "Loot Master";
+            if (suffix.Equals("seaofgems", StringComparison.OrdinalIgnoreCase)) return "Sea of Gems";
             return char.ToUpperInvariant(suffix[0]) + suffix.Substring(1).ToLowerInvariant();
         }
         return templateName;

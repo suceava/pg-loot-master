@@ -88,7 +88,7 @@ public sealed class SolverContext
     /// <summary>Solver strategy preset. Defaults to Safe.</summary>
     public SolverStrategy Strategy { get; init; } = SolverStrategy.Safe;
     /// <summary>
-    /// Game-style string ("Loot Master", "Cashfall", "Deluxe", …) — drives the
+    /// Game-style string ("Loot Master", "Cashfall", "Deluxe", "Sea of Gems", …) — drives the
     /// variant-aware per-match formula in <c>Empirical</c>. Null/unknown → defensive
     /// fallback to today's ad-hoc constants.
     /// </summary>
@@ -704,7 +704,7 @@ public static class Solver
             {
                 baseScore = 3.0 * m.Length - 6.0 + 2.0 * Math.Ceiling(c / 2.0);
             }
-            else  // "Loot Master", "Cashfall", and anything else with the LM formula
+            else  // "Loot Master", "Cashfall", "Sea of Gems", and anything else with the LM formula
             {
                 baseScore = 2.0 * m.Length - 3.0 + (c >= 2 ? 2.0 : 0.0);
             }

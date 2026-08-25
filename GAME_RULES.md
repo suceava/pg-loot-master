@@ -5,9 +5,9 @@ This is the **living reference** for how the game works and what the tool is for
 and its stated goal are outdated. When anything here changes, update this file — and do
 it at every checkpoint.
 
-## The three games
+## The four games
 
-Project: Gorgon has three Bejeweled-style match-3 minigames at NPC vendors:
+Project: Gorgon has four Bejeweled-style match-3 minigames at NPC vendors:
 
 - **Loot Master** and **Cashfall** — **identical rules**; this document covers both.
 - **Deluxe** ("Lootmaster Deluxe Match-3") — a third variant, gated behind character
@@ -16,6 +16,15 @@ Project: Gorgon has three Bejeweled-style match-3 minigames at NPC vendors:
   so panel detection and board extraction work unchanged (covered by
   `DeluxePanelTests`). The sidebar layout is the same as Loot Master. Match/scoring
   rules are assumed identical pending in-game confirmation.
+- **Sea of Gems** — a fourth variant, at the Red Wing Casino vendor. Panel-detection
+  template added (`panel-title-seaofgems.png`) and verified against a real capture by
+  `SeaOfGemsPanelTests`: **7×7 grid with the same cell geometry**, same sidebar layout
+  (it carries Deluxe's extra Turns Made / Possible Moves rows), starts with **4 item
+  types**, and shows the same **30-match** first capture threshold. Match/scoring rules
+  are **assumed identical to Loot Master** pending confirmation — the solver falls
+  through to the Loot Master formula for any style it does not recognise, and
+  `scoring-observations.csv` logs Sea of Gems turns under `game_style=Sea of Gems`, so
+  the formula can be reverse-engineered exactly the way Deluxe's was.
 
 ## What the tool optimizes for (the goal)
 
@@ -113,8 +122,9 @@ turns (57 clean no-cascade single matches):
   against it; **the first to reach `N` captures**, and **every other non-captured
   item's count resets to 0**. The race then restarts at the next threshold.
 - **Threshold sequence** (`N` by capture order): **`30, 30, 25, 25, …`** for Loot
-  Master / Cashfall — confirmed; stays at 25 after the second capture. Deluxe is
-  assumed identical, pending in-game confirmation.
+  Master / Cashfall — confirmed; stays at 25 after the second capture. Deluxe and Sea of
+  Gems are assumed identical, pending in-game confirmation (Sea of Gems is confirmed to
+  open at 30).
 - **Simultaneous-capture tiebreak.** If a single swap+cascade pushes two items
   past `N` in the same turn, the **first-matched** captures; the other resets to
   0 with everything else. *(Best guess; in-game confirmation pending.)*
@@ -145,6 +155,11 @@ turns (57 clean no-cascade single matches):
   progression. Confirm what actually flips it.
 - **Deluxe capture-threshold sequence** — assumed identical to Loot Master
   (`30, 30, 25, …`); confirm.
+- **Sea of Gems scoring formula** — currently assumed identical to Loot Master
+  (`2N − 3`, `+2` once `C ≥ 2`). Nothing has been fit to logged turns yet; re-run the
+  same per-match regression over `scoring-observations.csv` rows with
+  `game_style=Sea of Gems` once a few hundred turns exist. Its capture-threshold
+  sequence needs the same confirmation as Deluxe's.
 - **Simultaneous-capture tiebreak** — if one swap+cascade pushes two items past
   the threshold in the same turn, the first-matched is assumed to win; verify.
 - Whether **gravity-cascade** matches grant turn bonuses, or only the swap's own matches.

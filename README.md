@@ -6,10 +6,11 @@ A Windows overlay that watches Project: Gorgon's **match-3 minigames** and tells
 
 ### [→ Download PgLootMaster.exe (latest release)](https://github.com/suceava/pg-loot-master/releases/latest/download/PgLootMaster.exe)
 
-Works with all three match-3 vendors:
+Works with all four match-3 vendors:
 - **Loot Master**
 - **Cashfall**
 - **Lootmaster Deluxe**
+- **Sea of Gems**
 
 ---
 
@@ -95,11 +96,12 @@ Your history is saved automatically — if the app crashes or you close it mid-g
 
 ## Game styles supported
 
-All three current match-3 variants work out of the box. The tool detects which one you've opened from the panel title and uses the right scoring for it — no setting to flip.
+All four current match-3 variants work out of the box. The tool detects which one you've opened from the panel title and uses the right scoring for it — no setting to flip.
 
 - **Loot Master** — the base game.
 - **Cashfall** — same rules as Loot Master.
 - **Lootmaster Deluxe** — unlocked at level 30, scores higher per match.
+- **Sea of Gems** — Red Wing Casino vendor; same board, sidebar and capture thresholds as Loot Master, and scored with the Loot Master formula until enough turns are logged to confirm it.
 
 ---
 
